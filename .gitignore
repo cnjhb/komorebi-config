@@ -1,0 +1,16 @@
+# build output / binaries
+*.exe
+bin/
+obj/
+
+# logs
+*.log
+
+# editors / VS
+.vs/
+*.user
+*.suo
+
+# OS
+Thumbs.db
+desktop.ini

@@ -1,0 +1,51 @@
+.shell pwsh
+
+# ===== komorebi / reload =====
+win + ctrl + r          : komorebic reload-configuration
+win + ctrl + shift + r  : Stop-Process -Name whkd -Force -ErrorAction SilentlyContinue; Start-Process "$env:ProgramFiles\whkd\bin\whkd.exe" -WindowStyle Hidden
+win + shift + r         : komorebic retile
+win + s                 : komorebic toggle-shortcuts
+
+# ===== launch apps (always on the focused monitor) =====
+win + return            : & "$HOME\AppData\Local\Programs\launch-focused.ps1" terminal
+win + oem_7             : & "$HOME\AppData\Local\Programs\launch-focused.ps1" firefox
+win + d                 : Start-Process explorer.exe
+win + p                 : komorebic toggle-shortcuts
+
+# ===== focus windows (awesome: win+j / win+k by index) =====
+win + j                 : komorebic cycle-focus next
+win + k                 : komorebic cycle-focus previous
+win + shift + j         : komorebic cycle-move next
+win + shift + k         : komorebic cycle-move previous
+win + ctrl + j          : komorebic cycle-monitor next
+win + ctrl + k          : komorebic cycle-monitor previous
+
+# ===== window actions =====
+win + f                 : komorebic toggle-monocle
+win + m                 : komorebic toggle-maximize
+win + shift + c         : komorebic close
+win + ctrl + space      : komorebic toggle-float
+win + ctrl + return     : komorebic promote
+win + o                 : komorebic cycle-move-to-monitor next
+win + t                 : komorebic toggle-float
+
+# ===== workspaces (awesome tags 1-9) =====
+win + 1                 : komorebic focus-workspace 0
+win + 2                 : komorebic focus-workspace 1
+win + 3                 : komorebic focus-workspace 2
+win + 4                 : komorebic focus-workspace 3
+win + 5                 : komorebic focus-workspace 4
+win + 6                 : komorebic focus-workspace 5
+win + 7                 : komorebic focus-workspace 6
+win + 8                 : komorebic focus-workspace 7
+win + 9                 : komorebic focus-workspace 8
+
+win + shift + 1         : komorebic move-to-workspace 0
+win + shift + 2         : komorebic move-to-workspace 1
+win + shift + 3         : komorebic move-to-workspace 2
+win + shift + 4         : komorebic move-to-workspace 3
+win + shift + 5         : komorebic move-to-workspace 4
+win + shift + 6         : komorebic move-to-workspace 5
+win + shift + 7         : komorebic move-to-workspace 6
+win + shift + 8         : komorebic move-to-workspace 7
+win + shift + 9         : komorebic move-to-workspace 8

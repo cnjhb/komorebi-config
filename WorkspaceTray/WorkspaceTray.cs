@@ -1,0 +1,851 @@
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Drawing;
+using System.Drawing.Drawing2D;
+using System.Drawing.Imaging;
+using System.Drawing.Text;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+using System.Web.Script.Serialization;
+using System.Windows.Forms;
+using Microsoft.Win32;
+using RECT = KomorebiTaskbarInfo.Native.RECT;
+
+namespace KomorebiTaskbarInfo
+{
+    static class Program
+    {
+        [STAThread]
+        static void Main()
+        {
+            bool createdNew;
+            using (var mutex = new Mutex(true, @"Global\KomorebiTaskbarInfo", out createdNew))
+            {
+                if (!createdNew) return;
+                try { Native.SetProcessDpiAwarenessContext(new IntPtr(-4)); } catch { }
+                Application.EnableVisualStyles();
+                Application.SetCompatibleTextRenderingDefault(false);
+                Application.Run(new InfoContext());
+            }
+        }
+    }
+
+    class InfoContext : ApplicationContext
+    {
+        const string PipeName = "komorebi-taskbar-info";
+        static readonly string Komorebic = System.IO.Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+            "komorebi", "bin", "komorebic.exe");
+
+        static readonly string StartScript = System.IO.Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "Programs", "komorebi-start.ps1");
+
+        static readonly string LogPath =
+            System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "taskbar-info.log");
+
+        readonly List<Strip> _strips = new List<Strip>();
+        readonly NotifyIcon _tray;
+        readonly ToolStripMenuItem _statusItem;
+        readonly System.Windows.Forms.Timer _timer;
+        readonly Control _marshal;
+        readonly object _sync = new object();
+        readonly Dictionary<string, string> _lastTitle = new Dictionary<string, string>();
+
+        Dictionary<string, object> _state;
+        volatile bool _exit;
+        bool _fullscreen;
+        bool _light = true;
+        Icon _icon;
+        string _iconText = "";
+        string _iconTooltip = "";
+        bool _iconConnected;
+
+        public InfoContext()
+        {
+            _marshal = new Control();
+            IntPtr forceHandle = _marshal.Handle;
+            ReadTheme();
+
+            _statusItem = new ToolStripMenuItem("正在连接 komorebi…");
+            _statusItem.Enabled = false;
+
+            var menu = new ContextMenuStrip();
+            menu.Items.Add(_statusItem);
+            menu.Items.Add(new ToolStripSeparator());
+            var restart = new ToolStripMenuItem("重启 komorebi");
+            restart.Click += delegate { RestartKomorebi(); };
+            menu.Items.Add(restart);
+            var quit = new ToolStripMenuItem("退出");
+            quit.Click += delegate { ExitApp(); };
+            menu.Items.Add(quit);
+
+            _tray = new NotifyIcon();
+            _tray.ContextMenuStrip = menu;
+            _tray.Visible = true;
+            SetTray("?", "komorebi · 正在连接", false);
+
+            BuildStrips();
+
+            _timer = new System.Windows.Forms.Timer();
+            _timer.Interval = 400;
+            _timer.Tick += delegate { Tick(); };
+            _timer.Start();
+
+            var worker = new Thread(Worker);
+            worker.IsBackground = true;
+            worker.Start();
+
+            Log("started");
+        }
+
+        internal static void Log(string message)
+        {
+            try
+            {
+                System.IO.File.AppendAllText(LogPath,
+                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") + "  " + message + Environment.NewLine,
+                    Encoding.UTF8);
+            }
+            catch { }
+        }
+
+        void ReadTheme()
+        {
+            try
+            {
+                using (var key = Registry.CurrentUser.OpenSubKey(
+                    @"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"))
+                {
+                    if (key != null)
+                    {
+                        var v = key.GetValue("SystemUsesLightTheme");
+                        if (v is int) _light = (int)v != 0;
+                    }
+                }
+            }
+            catch { }
+        }
+
+        void BuildStrips()
+        {
+            var taskbars = new List<IntPtr>();
+            IntPtr primary = Native.FindWindow("Shell_TrayWnd", null);
+            if (primary != IntPtr.Zero) taskbars.Add(primary);
+
+            IntPtr h = IntPtr.Zero;
+            while ((h = Native.FindWindowEx(IntPtr.Zero, h, "Shell_SecondaryTrayWnd", null)) != IntPtr.Zero)
+                taskbars.Add(h);
+
+            foreach (var tb in taskbars)
+            {
+                string device = Native.MonitorDeviceOf(tb);
+                if (string.IsNullOrEmpty(device)) continue;
+                var strip = new Strip(tb, device, tb == primary);
+                strip.Show();
+                _strips.Add(strip);
+                Log("strip " + device + " bounds=" + strip.CurrentBounds);
+            }
+        }
+
+        void Tick()
+        {
+            try
+            {
+                ReadTheme();
+
+                bool fullscreen = IsFullscreenForeground();
+                if (fullscreen != _fullscreen)
+                {
+                    _fullscreen = fullscreen;
+                    foreach (var s in _strips) s.Visible = !_fullscreen;
+                }
+
+                foreach (var s in _strips)
+                {
+                    if (!s.Visible) continue;
+                    s.RefreshBounds();
+                }
+
+                RefreshAll();
+            }
+            catch (Exception ex)
+            {
+                Log("tick: " + ex.Message);
+            }
+        }
+
+        bool IsFullscreenForeground()
+        {
+            IntPtr fg = Native.GetForegroundWindow();
+            if (fg == IntPtr.Zero) return false;
+            var cls = Native.ClassNameOf(fg);
+            if (cls == "Progman" || cls == "WorkerW" || cls == "Shell_TrayWnd" ||
+                cls == "Shell_SecondaryTrayWnd" || cls == "Windows.UI.Core.CoreWindow") return false;
+
+            RECT r;
+            if (!Native.GetWindowRect(fg, out r)) return false;
+            IntPtr mon = Native.MonitorFromWindow(fg, Native.MONITOR_DEFAULTTONEAREST);
+            var mi = new Native.MONITORINFO();
+            mi.cbSize = Marshal.SizeOf(typeof(Native.MONITORINFO));
+            if (!Native.GetMonitorInfo(mon, ref mi)) return false;
+            return r.Left <= mi.rcMonitor.Left && r.Top <= mi.rcMonitor.Top &&
+                   r.Right >= mi.rcMonitor.Right && r.Bottom >= mi.rcMonitor.Bottom;
+        }
+
+        void RefreshAll()
+        {
+            Dictionary<string, object> state;
+            lock (_sync) state = _state;
+            if (state == null) return;
+
+            var monitors = AsDict(state, "monitors");
+            if (monitors == null) return;
+            var mons = AsArray(monitors, "elements");
+            if (mons == null) return;
+
+            IntPtr fg = Native.GetForegroundWindow();
+            string fgMonitor = null;
+            string fgTitle = null;
+            for (int i = 0; i < mons.Length && fgMonitor == null; i++)
+            {
+                var mon = AsDict(mons[i]);
+                if (mon == null) continue;
+                var ws = AsDict(mon, "workspaces");
+                var wss = ws == null ? null : AsArray(ws, "elements");
+                if (wss == null) continue;
+                for (int j = 0; j < wss.Length && fgMonitor == null; j++)
+                {
+                    var w = AsDict(wss[j]);
+                    var cs = w == null ? null : AsArray(w, "containers");
+                    if (cs == null) continue;
+                    for (int k = 0; k < cs.Length && fgMonitor == null; k++)
+                    {
+                        var c = AsDict(cs[k]);
+                        var wins = c == null ? null : AsArray(c, "windows");
+                        if (wins == null) continue;
+                        for (int m = 0; m < wins.Length; m++)
+                        {
+                            var win = AsDict(wins[m]);
+                            if (win == null) continue;
+                            if (Convert.ToInt64(win["hwnd"]) == fg.ToInt64())
+                            {
+                                fgMonitor = Convert.ToString(mon["name"]);
+                                fgTitle = Convert.ToString(win["title"]);
+                                break;
+                            }
+                        }
+                    }
+                }
+            }
+
+            int focusedMonitor = 0;
+            try { focusedMonitor = Convert.ToInt32(monitors["focused"]); } catch { }
+
+            foreach (var strip in _strips)
+            {
+                int mi = -1;
+                for (int i = 0; i < mons.Length; i++)
+                {
+                    var mon = AsDict(mons[i]);
+                    if (mon != null && Convert.ToString(mon["name"]) == strip.DeviceName) { mi = i; break; }
+                }
+                if (mi < 0) continue;
+
+                var monitor = AsDict(mons[mi]);
+                var ws = AsDict(monitor, "workspaces");
+                if (ws == null) continue;
+                var wss = AsArray(ws, "elements");
+                if (wss == null) continue;
+
+                int wsi = 0;
+                try { wsi = Convert.ToInt32(ws["focused"]); } catch { }
+
+                var names = new List<string>();
+                foreach (var o in wss)
+                {
+                    var d = AsDict(o);
+                    names.Add(d == null ? "" : Convert.ToString(d["name"]));
+                }
+
+                string layout = "";
+                if (wsi >= 0 && wsi < wss.Length)
+                {
+                    var focusedWs = AsDict(wss[wsi]);
+                    if (focusedWs != null) layout = LayoutName(focusedWs["layout"]);
+                }
+
+                string title = "";
+                if (fgMonitor == strip.DeviceName)
+                {
+                    title = fgTitle;
+                    _lastTitle[strip.DeviceName] = title;
+                }
+                else
+                {
+                    _lastTitle.TryGetValue(strip.DeviceName, out title);
+                }
+
+                strip.SetModel(names, wsi, title, layout, _light);
+
+                if (mi == focusedMonitor)
+                {
+                    string name = (wsi >= 0 && wsi < names.Count) ? names[wsi] : "";
+                    if (string.IsNullOrEmpty(name)) name = (wsi + 1).ToString();
+                    SetTray(name, "komorebi · 工作区 " + name + " · " + strip.DeviceName, true);
+                    _statusItem.Text = "工作区 " + name + " · " + strip.DeviceName;
+                }
+            }
+        }
+
+        static Dictionary<string, object> AsDict(Dictionary<string, object> d, string key)
+        {
+            object o;
+            if (d == null || !d.TryGetValue(key, out o)) return null;
+            return o as Dictionary<string, object>;
+        }
+
+        static Dictionary<string, object> AsDict(object o)
+        {
+            return o as Dictionary<string, object>;
+        }
+
+        static object[] AsArray(Dictionary<string, object> d, string key)
+        {
+            object o;
+            if (d == null || !d.TryGetValue(key, out o) || o == null) return null;
+            var arr = o as object[];
+            if (arr != null) return arr;
+            var seq = o as System.Collections.IEnumerable;
+            if (seq == null) return null;
+            var list = new List<object>();
+            foreach (var item in seq) list.Add(item);
+            return list.ToArray();
+        }
+
+        static string LayoutName(object layout)
+        {
+            var d = layout as Dictionary<string, object>;
+            if (d == null || d.Count == 0) return "";
+            object v;
+            if (d.TryGetValue("Default", out v)) return Convert.ToString(v);
+            foreach (var kv in d) return kv.Key;
+            return "";
+        }
+
+        void SetTray(string text, string tooltip, bool connected)
+        {
+            if (_icon != null && _iconText == text && _iconTooltip == tooltip && _iconConnected == connected)
+                return;
+            _iconConnected = connected;
+            _iconText = text;
+            _iconTooltip = tooltip;
+            var newIcon = RenderDigitIcon(text, connected);
+            var old = _icon;
+            _icon = newIcon;
+            _tray.Icon = _icon;
+            if (old != null) old.Dispose();
+            _tray.Text = tooltip.Length > 120 ? tooltip.Substring(0, 120) : tooltip;
+        }
+
+        static Icon RenderDigitIcon(string text, bool connected)
+        {
+            const int size = 32;
+            using (var bmp = new Bitmap(size, size, PixelFormat.Format32bppArgb))
+            {
+                using (var g = Graphics.FromImage(bmp))
+                {
+                    g.SmoothingMode = SmoothingMode.AntiAlias;
+                    g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+                    g.Clear(Color.Transparent);
+
+                    Color bg = connected
+                        ? Color.FromArgb(255, 0x6C, 0x4C, 0xE8)
+                        : Color.FromArgb(255, 0x9E, 0x9E, 0x9E);
+
+                    using (var path = RoundedRect(new RectangleF(1, 1, size - 2, size - 2), 8f))
+                    using (var brush = new SolidBrush(bg))
+                        g.FillPath(brush, path);
+
+                    using (var font = new Font("JetBrainsMono NF", 19f, FontStyle.Bold, GraphicsUnit.Pixel))
+                    using (var brush = new SolidBrush(Color.White))
+                    using (var sf = new StringFormat())
+                    {
+                        sf.Alignment = StringAlignment.Center;
+                        sf.LineAlignment = StringAlignment.Center;
+                        g.DrawString(text, font, brush, new RectangleF(0, 0, size, size), sf);
+                    }
+                }
+                IntPtr h = bmp.GetHicon();
+                var icon = (Icon)Icon.FromHandle(h).Clone();
+                Native.DestroyIcon(h);
+                return icon;
+            }
+        }
+
+        internal static GraphicsPath RoundedRect(RectangleF r, float radius)
+        {
+            var path = new GraphicsPath();
+            float d = radius * 2f;
+            path.AddArc(r.X, r.Y, d, d, 180, 90);
+            path.AddArc(r.Right - d, r.Y, d, d, 270, 90);
+            path.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
+            path.AddArc(r.X, r.Bottom - d, d, d, 90, 90);
+            path.CloseFigure();
+            return path;
+        }
+
+        void Worker()
+        {
+            while (!_exit)
+            {
+                try
+                {
+                    using (var pipe = new System.IO.Pipes.NamedPipeServerStream(
+                        PipeName,
+                        System.IO.Pipes.PipeDirection.InOut,
+                        1,
+                        System.IO.Pipes.PipeTransmissionMode.Byte,
+                        System.IO.Pipes.PipeOptions.None))
+                    {
+                        var wait = pipe.WaitForConnectionAsync();
+                        Subscribe();
+                        if (!wait.Wait(4000)) continue;
+
+                        Log("subscriber connected");
+                        using (var reader = new System.IO.StreamReader(pipe, Encoding.UTF8))
+                        {
+                            var serializer = new JavaScriptSerializer();
+                            serializer.MaxJsonLength = int.MaxValue;
+                            string line;
+                            while ((line = reader.ReadLine()) != null)
+                            {
+                                if (_exit) return;
+                                if (string.IsNullOrEmpty(line)) continue;
+                                try
+                                {
+                                    var obj = serializer.Deserialize<Dictionary<string, object>>(line);
+                                    if (obj == null) continue;
+                                    object stateObj;
+                                    if (!obj.TryGetValue("state", out stateObj)) continue;
+                                    var st = stateObj as Dictionary<string, object>;
+                                    if (st == null) continue;
+                                    lock (_sync) _state = st;
+                                    _marshal.BeginInvoke((Action)delegate
+                                    {
+                                        try { RefreshAll(); }
+                                        catch (Exception rex) { Log("refresh: " + rex.Message); }
+                                    });
+                                }
+                                catch (Exception ex)
+                                {
+                                    Log("parse: " + ex.Message);
+                                }
+                            }
+                        }
+                        Log("subscriber disconnected");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    Log("worker: " + ex.Message);
+                }
+                Thread.Sleep(1000);
+            }
+        }
+
+        void Subscribe()
+        {
+            try
+            {
+                var psi = new ProcessStartInfo(Komorebic, "subscribe-pipe " + PipeName);
+                psi.CreateNoWindow = true;
+                psi.UseShellExecute = false;
+                using (var p = Process.Start(psi))
+                {
+                    p.WaitForExit(3000);
+                }
+            }
+            catch { }
+        }
+
+        void RestartKomorebi()
+        {
+            try
+            {
+                var psi = new ProcessStartInfo(
+                    "powershell.exe",
+                    "-NoProfile -ExecutionPolicy Bypass -File \"" + StartScript + "\"");
+                psi.CreateNoWindow = true;
+                psi.UseShellExecute = false;
+                Process.Start(psi);
+            }
+            catch (Exception ex)
+            {
+                Log("restart: " + ex.Message);
+            }
+        }
+
+        void ExitApp()
+        {
+            _exit = true;
+            try { _timer.Stop(); } catch { }
+            try { _tray.Visible = false; _tray.Dispose(); } catch { }
+            foreach (var s in _strips)
+            {
+                try { s.Close(); s.Dispose(); } catch { }
+            }
+            ExitThread();
+        }
+    }
+
+    class Strip : Form
+    {
+        // Dracula-ish palette (works on the light Windows 11 taskbar as a dark capsule)
+        static readonly Color Capsule = Color.FromArgb(255, 0x1E, 0x1F, 0x29);
+        static readonly Color CapsuleEdge = Color.FromArgb(255, 0x33, 0x36, 0x4A);
+        static readonly Color TextNormal = Color.FromArgb(255, 0x9B, 0xA3, 0xB4);
+        static readonly Color TextActive = Color.FromArgb(255, 0xBD, 0x93, 0xF9);
+        static readonly Color TextTitle = Color.FromArgb(255, 0xF8, 0xF8, 0xF2);
+        static readonly Color TextDim = Color.FromArgb(255, 0x62, 0x72, 0xA4);
+        static readonly Color Separator = Color.FromArgb(255, 0x44, 0x47, 0x5A);
+
+        readonly IntPtr _taskbar;
+        readonly bool _primary;
+        public readonly string DeviceName;
+
+        List<string> _names = new List<string>();
+        int _focused;
+        string _title = "";
+        string _layout = "";
+        bool _light = true;
+        Rectangle _bounds;
+        bool _rendered;
+
+        public Rectangle CurrentBounds { get { return _bounds; } }
+
+        public Strip(IntPtr taskbar, string device, bool primary)
+        {
+            _taskbar = taskbar;
+            DeviceName = device;
+            _primary = primary;
+
+            FormBorderStyle = FormBorderStyle.None;
+            ShowInTaskbar = false;
+            StartPosition = FormStartPosition.Manual;
+            AutoScaleMode = AutoScaleMode.None;
+            TopMost = true;
+            BackColor = Capsule;
+            SetStyle(ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint, true);
+            _bounds = new Rectangle(0, 0, 1, 1);
+            RefreshBounds();
+        }
+
+        protected override CreateParams CreateParams
+        {
+            get
+            {
+                var cp = base.CreateParams;
+                cp.ExStyle |= Native.WS_EX_NOACTIVATE | Native.WS_EX_TOOLWINDOW;
+                return cp;
+            }
+        }
+
+        const int WM_NCHITTEST = 0x0084;
+        const int WM_MOUSEACTIVATE = 0x0021;
+        const int HTTRANSPARENT = -1;
+        const int MA_NOACTIVATE = 3;
+
+        protected override void WndProc(ref Message m)
+        {
+            if (m.Msg == WM_NCHITTEST) { m.Result = new IntPtr(HTTRANSPARENT); return; }
+            if (m.Msg == WM_MOUSEACTIVATE) { m.Result = new IntPtr(MA_NOACTIVATE); return; }
+            base.WndProc(ref m);
+        }
+
+        public void RefreshBounds()
+        {
+            RECT tr;
+            if (!Native.GetWindowRect(_taskbar, out tr)) return;
+
+            int startLeft = tr.Right;
+            IntPtr start = Native.FindWindowEx(_taskbar, IntPtr.Zero, "Start", null);
+            if (start != IntPtr.Zero)
+            {
+                RECT sr;
+                if (Native.GetWindowRect(start, out sr)) startLeft = sr.Left;
+            }
+
+            int inset = 4;
+            int left = _primary && WidgetsOn() ? 200 : 8;
+            int maxWidth = startLeft - 8 - left;
+            int height = tr.Bottom - tr.Top - inset * 2;
+            if (maxWidth < 180 || height < 20) return;
+
+            float fontPx = Math.Max(10f, height * 0.36f);
+            float pad = Math.Max(10f, height * 0.22f);
+            float step = fontPx * 1.10f;
+
+            float content = pad + _names.Count * step + pad * 1.4f;
+            if (!string.IsNullOrEmpty(_title))
+                content += Math.Min(360f, EstimateTextWidth(_title, fontPx));
+            if (!string.IsNullOrEmpty(_layout))
+                content += EstimateTextWidth(_layout, fontPx) + pad;
+
+            int width = Math.Min(maxWidth, Math.Max(180, (int)Math.Ceiling(content + pad)));
+
+            var desired = new Rectangle(left, tr.Top + inset, width, height);
+            bool changed = desired.Width != _bounds.Width || desired.Height != _bounds.Height ||
+                           desired.X != _bounds.X || desired.Y != _bounds.Y;
+            _bounds = desired;
+
+            Native.SetWindowPos(Handle, Native.HWND_TOPMOST, desired.X, desired.Y, desired.Width, desired.Height,
+                Native.SWP_NOACTIVATE | Native.SWP_SHOWWINDOW);
+
+            if (changed || !_rendered)
+            {
+                using (var path = InfoContext.RoundedRect(new RectangleF(0, 0, desired.Width, desired.Height), desired.Height / 2f))
+                {
+                    var old = Region;
+                    Region = new Region(path);
+                    if (old != null) old.Dispose();
+                }
+                Render();
+            }
+        }
+
+        static bool WidgetsOn()
+        {
+            try
+            {
+                using (var key = Registry.CurrentUser.OpenSubKey(
+                    @"Software\Microsoft\Windows\CurrentVersion\Explorer\Advanced"))
+                {
+                    if (key != null)
+                    {
+                        var v = key.GetValue("TaskbarDa");
+                        if (v is int) return (int)v != 0;
+                    }
+                }
+            }
+            catch { }
+            return true;
+        }
+
+        static float EstimateTextWidth(string text, float fontPx)
+        {
+            float units = 0f;
+            foreach (char ch in text) units += ch >= 0x2E80 ? 2f : 1f;
+            return units * fontPx * 0.62f;
+        }
+
+        public void SetModel(List<string> names, int focused, string title, string layout, bool light)
+        {
+            title = title ?? "";
+            layout = layout ?? "";
+
+            bool changed = light != _light || focused != _focused ||
+                           title != _title || layout != _layout ||
+                           names.Count != _names.Count;
+            if (!changed)
+            {
+                for (int i = 0; i < names.Count; i++)
+                {
+                    if (names[i] != _names[i]) { changed = true; break; }
+                }
+            }
+            if (!changed) return;
+
+            _names = names;
+            _focused = focused;
+            _title = title;
+            _layout = layout;
+            _light = light;
+            Render();
+        }
+
+        protected override void OnPaint(PaintEventArgs e)
+        {
+            RenderInto(e.Graphics, _bounds.Width, _bounds.Height);
+        }
+
+        void Render()
+        {
+            if (_bounds.Width <= 0 || _bounds.Height <= 0) return;
+            Invalidate();
+            Update();
+            _rendered = true;
+        }
+
+        void RenderInto(Graphics g, int w, int h)
+        {
+            g.SmoothingMode = SmoothingMode.AntiAlias;
+            g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
+            g.Clear(Capsule);
+
+            using (var edge = new Pen(CapsuleEdge, 1f))
+            using (var path = InfoContext.RoundedRect(new RectangleF(0.5f, 0.5f, w - 1f, h - 1f), h / 2f))
+                g.DrawPath(edge, path);
+
+            float fontPx = Math.Max(10f, h * 0.36f);
+            using (var font = new Font("JetBrainsMono NF", fontPx, FontStyle.Regular, GraphicsUnit.Pixel))
+            using (var bold = new Font("JetBrainsMono NF", fontPx, FontStyle.Bold, GraphicsUnit.Pixel))
+            using (var textBrush = new SolidBrush(TextNormal))
+            using (var activeBrush = new SolidBrush(TextActive))
+            using (var titleBrush = new SolidBrush(TextTitle))
+            using (var dimBrush = new SolidBrush(TextDim))
+            using (var sfCenter = new StringFormat())
+            using (var sfTitle = new StringFormat())
+            using (var sfRight = new StringFormat())
+            {
+                sfCenter.Alignment = StringAlignment.Center;
+                sfCenter.LineAlignment = StringAlignment.Center;
+
+                sfTitle.Alignment = StringAlignment.Near;
+                sfTitle.LineAlignment = StringAlignment.Center;
+                sfTitle.Trimming = StringTrimming.EllipsisCharacter;
+                sfTitle.FormatFlags = StringFormatFlags.NoWrap;
+
+                sfRight.Alignment = StringAlignment.Far;
+                sfRight.LineAlignment = StringAlignment.Center;
+                sfRight.Trimming = StringTrimming.EllipsisCharacter;
+                sfRight.FormatFlags = StringFormatFlags.NoWrap;
+
+                float pad = Math.Max(10f, h * 0.22f);
+                float step = fontPx * 1.10f;
+                float x = pad;
+
+                for (int i = 0; i < _names.Count; i++)
+                {
+                    string label = _names[i];
+                    if (string.IsNullOrEmpty(label)) label = (i + 1).ToString();
+                    if (label.Length > 2) label = (i + 1).ToString();
+
+                    bool active = i == _focused;
+                    g.DrawString(label, active ? bold : font, active ? activeBrush : textBrush,
+                        new RectangleF(x, 0, step, h), sfCenter);
+                    x += step;
+                }
+
+                x += pad * 0.6f;
+                using (var pen = new Pen(Separator, 1f))
+                    g.DrawLine(pen, x, h * 0.3f, x, h * 0.7f);
+                x += pad * 0.8f;
+
+                float layoutWidth = 0f;
+                if (!string.IsNullOrEmpty(_layout))
+                {
+                    layoutWidth = g.MeasureString(_layout, font).Width;
+                    g.DrawString(_layout, font, dimBrush,
+                        new RectangleF(w - pad - layoutWidth - 2, 0, layoutWidth + 2, h), sfRight);
+                    layoutWidth += pad;
+                }
+
+                float titleRight = w - pad - layoutWidth;
+                float titleWidth = titleRight - x;
+                if (titleWidth > 30 && !string.IsNullOrEmpty(_title))
+                {
+                    g.DrawString(_title, font, titleBrush,
+                        new RectangleF(x, 0, titleWidth, h), sfTitle);
+                }
+            }
+        }
+    }
+
+    static class Native
+    {
+        public const int WS_EX_TRANSPARENT = 0x00000020;
+        public const int WS_EX_TOOLWINDOW = 0x00000080;
+        public const int WS_EX_NOACTIVATE = 0x08000000;
+
+        public static readonly IntPtr HWND_TOPMOST = new IntPtr(-1);
+        public const uint SWP_NOSIZE = 0x0001;
+        public const uint SWP_NOMOVE = 0x0002;
+        public const uint SWP_NOACTIVATE = 0x0010;
+        public const uint SWP_SHOWWINDOW = 0x0040;
+
+        public const uint MONITOR_DEFAULTTONEAREST = 2;
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct RECT { public int Left, Top, Right, Bottom; }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct POINT { public int X, Y; public POINT(int x, int y) { X = x; Y = y; } }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct SIZE { public int CX, CY; public SIZE(int cx, int cy) { CX = cx; CY = cy; } }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        public struct MONITORINFO
+        {
+            public int cbSize;
+            public RECT rcMonitor;
+            public RECT rcWork;
+            public uint dwFlags;
+        }
+
+        [StructLayout(LayoutKind.Sequential, CharSet = CharSet.Unicode)]
+        public struct MONITORINFOEX
+        {
+            public int cbSize;
+            public RECT rcMonitor;
+            public RECT rcWork;
+            public uint dwFlags;
+            [MarshalAs(UnmanagedType.ByValTStr, SizeConst = 32)]
+            public string szDevice;
+        }
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        public static extern IntPtr FindWindow(string cls, string win);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        public static extern IntPtr FindWindowEx(IntPtr parent, IntPtr after, string cls, string win);
+
+        [DllImport("user32.dll")]
+        public static extern bool GetWindowRect(IntPtr h, out RECT r);
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr MonitorFromWindow(IntPtr h, uint flags);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        public static extern bool GetMonitorInfo(IntPtr h, ref MONITORINFO mi);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode, EntryPoint = "GetMonitorInfoW")]
+        public static extern bool GetMonitorInfoEx(IntPtr h, ref MONITORINFOEX mi);
+
+        [DllImport("user32.dll")]
+        public static extern IntPtr GetForegroundWindow();
+
+        [DllImport("user32.dll")]
+        public static extern bool SetWindowPos(IntPtr h, IntPtr after, int x, int y, int cx, int cy, uint flags);
+
+        [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+        public static extern int GetClassName(IntPtr h, StringBuilder sb, int max);
+
+        [DllImport("user32.dll")]
+        public static extern bool DestroyIcon(IntPtr h);
+
+        [DllImport("user32.dll")]
+        public static extern bool SetProcessDpiAwarenessContext(IntPtr ctx);
+
+        public static string ClassNameOf(IntPtr h)
+        {
+            var sb = new StringBuilder(256);
+            GetClassName(h, sb, 256);
+            return sb.ToString();
+        }
+
+        public static string MonitorDeviceOf(IntPtr hwnd)
+        {
+            IntPtr mon = MonitorFromWindow(hwnd, MONITOR_DEFAULTTONEAREST);
+            var mi = new MONITORINFOEX();
+            mi.cbSize = Marshal.SizeOf(typeof(MONITORINFOEX));
+            if (!GetMonitorInfoEx(mon, ref mi)) return null;
+            string device = mi.szDevice ?? "";
+            if (device.StartsWith(@"\\.\")) device = device.Substring(4);
+            return device;
+        }
+    }
+}
