@@ -264,10 +264,12 @@ namespace KomorebiTaskbarInfo
                 try { wsi = Convert.ToInt32(ws["focused"]); } catch { }
 
                 var names = new List<string>();
+                var occupied = new List<bool>();
                 foreach (var o in wss)
                 {
                     var d = AsDict(o);
                     names.Add(d == null ? "" : Convert.ToString(d["name"]));
+                    occupied.Add(IsWorkspaceOccupied(d));
                 }
 
                 string layout = "";
@@ -288,7 +290,7 @@ namespace KomorebiTaskbarInfo
                     _lastTitle.TryGetValue(strip.DeviceName, out title);
                 }
 
-                strip.SetModel(names, wsi, title, layout, _light);
+                strip.SetModel(names, wsi, title, layout, _light, occupied);
 
                 if (mi == focusedMonitor)
                 {
@@ -333,6 +335,24 @@ namespace KomorebiTaskbarInfo
             if (d.TryGetValue("Default", out v)) return Convert.ToString(v);
             foreach (var kv in d) return kv.Key;
             return "";
+        }
+
+        static bool IsWorkspaceOccupied(Dictionary<string, object> ws)
+        {
+            if (ws == null) return false;
+
+            var containers = AsDict(ws, "containers");
+            var containerEls = containers == null ? null : AsArray(containers, "elements");
+            if (containerEls != null && containerEls.Length > 0) return true;
+
+            var floating = AsDict(ws, "floating_windows");
+            var floatingEls = floating == null ? null : AsArray(floating, "elements");
+            if (floatingEls != null && floatingEls.Length > 0) return true;
+
+            object monocle;
+            if (ws.TryGetValue("monocle_container", out monocle) && monocle != null) return true;
+
+            return false;
         }
 
         void SetTray(string text, string tooltip, bool connected)
@@ -506,7 +526,8 @@ namespace KomorebiTaskbarInfo
         // Dracula-ish palette (works on the light Windows 11 taskbar as a dark capsule)
         static readonly Color Capsule = Color.FromArgb(255, 0x1E, 0x1F, 0x29);
         static readonly Color CapsuleEdge = Color.FromArgb(255, 0x33, 0x36, 0x4A);
-        static readonly Color TextNormal = Color.FromArgb(255, 0x9B, 0xA3, 0xB4);
+        static readonly Color TextOccupied = Color.FromArgb(255, 0xD6, 0xDB, 0xE8);
+        static readonly Color TextEmpty = Color.FromArgb(255, 0x4A, 0x50, 0x64);
         static readonly Color TextActive = Color.FromArgb(255, 0xBD, 0x93, 0xF9);
         static readonly Color TextTitle = Color.FromArgb(255, 0xF8, 0xF8, 0xF2);
         static readonly Color TextDim = Color.FromArgb(255, 0x62, 0x72, 0xA4);
@@ -517,6 +538,7 @@ namespace KomorebiTaskbarInfo
         public readonly string DeviceName;
 
         List<string> _names = new List<string>();
+        List<bool> _occupied = new List<bool>();
         int _focused;
         string _title = "";
         string _layout = "";
@@ -641,19 +663,28 @@ namespace KomorebiTaskbarInfo
             return units * fontPx * 0.62f;
         }
 
-        public void SetModel(List<string> names, int focused, string title, string layout, bool light)
+        public void SetModel(List<string> names, int focused, string title, string layout, bool light,
+                             List<bool> occupied)
         {
             title = title ?? "";
             layout = layout ?? "";
+            occupied = occupied ?? new List<bool>();
 
             bool changed = light != _light || focused != _focused ||
                            title != _title || layout != _layout ||
-                           names.Count != _names.Count;
+                           names.Count != _names.Count || occupied.Count != _occupied.Count;
             if (!changed)
             {
                 for (int i = 0; i < names.Count; i++)
                 {
                     if (names[i] != _names[i]) { changed = true; break; }
+                }
+            }
+            if (!changed)
+            {
+                for (int i = 0; i < occupied.Count; i++)
+                {
+                    if (occupied[i] != _occupied[i]) { changed = true; break; }
                 }
             }
             if (!changed) return;
@@ -663,6 +694,7 @@ namespace KomorebiTaskbarInfo
             _title = title;
             _layout = layout;
             _light = light;
+            _occupied = occupied;
             Render();
         }
 
@@ -692,7 +724,8 @@ namespace KomorebiTaskbarInfo
             float fontPx = Math.Max(10f, h * 0.36f);
             using (var font = new Font("JetBrainsMono NF", fontPx, FontStyle.Regular, GraphicsUnit.Pixel))
             using (var bold = new Font("JetBrainsMono NF", fontPx, FontStyle.Bold, GraphicsUnit.Pixel))
-            using (var textBrush = new SolidBrush(TextNormal))
+            using (var occupiedBrush = new SolidBrush(TextOccupied))
+            using (var emptyBrush = new SolidBrush(TextEmpty))
             using (var activeBrush = new SolidBrush(TextActive))
             using (var titleBrush = new SolidBrush(TextTitle))
             using (var dimBrush = new SolidBrush(TextDim))
@@ -724,7 +757,9 @@ namespace KomorebiTaskbarInfo
                     if (label.Length > 2) label = (i + 1).ToString();
 
                     bool active = i == _focused;
-                    g.DrawString(label, active ? bold : font, active ? activeBrush : textBrush,
+                    bool occ = i < _occupied.Count && _occupied[i];
+                    var digitBrush = active ? activeBrush : (occ ? occupiedBrush : emptyBrush);
+                    g.DrawString(label, active ? bold : font, digitBrush,
                         new RectangleF(x, 0, step, h), sfCenter);
                     x += step;
                 }
