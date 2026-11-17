@@ -45,6 +45,12 @@ Copy-Item (Join-Path $root 'WorkspaceTray\build.ps1')        $trayDir -Force
 Write-Host "copied configuration files"
 
 Write-Host 'compiling WorkspaceTray...'
+$runningTray = Get-Process WorkspaceTray -ErrorAction SilentlyContinue
+if ($runningTray) {
+    Write-Host 'stopping running WorkspaceTray (the exe is locked while it runs)'
+    $runningTray | Stop-Process -Force
+    Start-Sleep -Milliseconds 600
+}
 & (Join-Path $trayDir 'build.ps1') | Out-Host
 
 $lnkPath  = Join-Path ([Environment]::GetFolderPath('Startup')) 'komorebi.lnk'
