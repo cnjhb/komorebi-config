@@ -639,6 +639,11 @@ namespace KomorebiTaskbarInfo
         static readonly Color TextDim = Color.FromArgb(255, 0x62, 0x72, 0xA4);
         static readonly Color Separator = Color.FromArgb(255, 0x44, 0x47, 0x5A);
 
+        Color _bgTop;
+        Color _bgMid;
+        Color _bgBottom;
+        DateTime _lastSample = DateTime.MinValue;
+
         readonly IntPtr _taskbar;
         readonly bool _primary;
         public readonly string DeviceName;
@@ -665,10 +670,79 @@ namespace KomorebiTaskbarInfo
             StartPosition = FormStartPosition.Manual;
             AutoScaleMode = AutoScaleMode.None;
             TopMost = true;
-            BackColor = Capsule;
+            var initialBg = IsLightTheme() ? Color.FromArgb(255, 249, 249, 249) : Color.FromArgb(255, 43, 43, 43);
+            _bgTop = _bgMid = _bgBottom = initialBg;
+            BackColor = initialBg;
             SetStyle(ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint, true);
             _bounds = new Rectangle(0, 0, 1, 1);
             RefreshBounds();
+        }
+
+        static bool IsLightTheme()
+        {
+            try
+            {
+                using (var key = Registry.CurrentUser.OpenSubKey(
+                    @"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"))
+                {
+                    if (key != null)
+                    {
+                        var v = key.GetValue("SystemUsesLightTheme");
+                        if (v is int) return (int)v != 0;
+                    }
+                }
+            }
+            catch { }
+            return true;
+        }
+
+        static int ColorDiff(Color a, Color b)
+        {
+            return Math.Max(Math.Abs(a.R - b.R), Math.Max(Math.Abs(a.G - b.G), Math.Abs(a.B - b.B)));
+        }
+
+        // Samples the taskbar background (top/middle/bottom) in the empty gap
+        // to the right of the strip. The window itself stays rectangular and
+        // paints this gradient, so the anti-aliased capsule corners blend into
+        // the taskbar instead of being clipped by a hard 1-bit window region.
+        void SampleBackground(RECT taskbar, int startLeft)
+        {
+            if ((DateTime.Now - _lastSample).TotalSeconds < 2) return;
+            _lastSample = DateTime.Now;
+
+            int x1 = _bounds.Right + 8;
+            int x2 = startLeft - 8;
+            if (x2 - x1 < 16) return;
+
+            int x = (x1 + x2) / 2;
+            int top = taskbar.Top + 6;
+            int bottom = taskbar.Bottom - 6;
+            int mid = (top + bottom) / 2;
+
+            try
+            {
+                using (var bmp = new Bitmap(1, 3))
+                using (var g = Graphics.FromImage(bmp))
+                {
+                    g.CopyFromScreen(x, top, 0, 0, new Size(1, 1));
+                    g.CopyFromScreen(x, mid, 0, 1, new Size(1, 1));
+                    g.CopyFromScreen(x, bottom, 0, 2, new Size(1, 1));
+
+                    var c1 = bmp.GetPixel(0, 0);
+                    var c2 = bmp.GetPixel(0, 1);
+                    var c3 = bmp.GetPixel(0, 2);
+
+                    if (ColorDiff(c1, _bgTop) > 3 || ColorDiff(c2, _bgMid) > 3 || ColorDiff(c3, _bgBottom) > 3)
+                    {
+                        _bgTop = c1;
+                        _bgMid = c2;
+                        _bgBottom = c3;
+                        BackColor = c2;
+                        Render();
+                    }
+                }
+            }
+            catch { }
         }
 
         protected override CreateParams CreateParams
@@ -732,14 +806,10 @@ namespace KomorebiTaskbarInfo
             Native.SetWindowPos(Handle, Native.HWND_TOPMOST, desired.X, desired.Y, desired.Width, desired.Height,
                 Native.SWP_NOACTIVATE | Native.SWP_SHOWWINDOW);
 
+            SampleBackground(tr, startLeft);
+
             if (changed || !_rendered)
             {
-                using (var path = InfoContext.RoundedRect(new RectangleF(0, 0, desired.Width, desired.Height), desired.Height / 2f))
-                {
-                    var old = Region;
-                    Region = new Region(path);
-                    if (old != null) old.Dispose();
-                }
                 Render();
             }
         }
@@ -820,12 +890,27 @@ namespace KomorebiTaskbarInfo
         void RenderInto(Graphics g, int w, int h)
         {
             g.SmoothingMode = SmoothingMode.AntiAlias;
-            g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
-            g.Clear(Capsule);
+            g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
+
+            // The window is rectangular; paint a taskbar-coloured gradient so
+            // the anti-aliased capsule edge blends into the taskbar instead of
+            // being clipped by a jagged 1-bit window region.
+            using (var bg = new LinearGradientBrush(new Rectangle(0, 0, w, h), _bgTop, _bgBottom, 90f))
+            {
+                var blend = new ColorBlend(3);
+                blend.Colors = new[] { _bgTop, _bgMid, _bgBottom };
+                blend.Positions = new[] { 0f, 0.5f, 1f };
+                bg.InterpolationColors = blend;
+                g.FillRectangle(bg, 0, 0, w, h);
+            }
+
+            using (var fill = new SolidBrush(Capsule))
+            using (var pill = InfoContext.RoundedRect(new RectangleF(0, 0, w, h), h / 2f))
+                g.FillPath(fill, pill);
 
             using (var edge = new Pen(CapsuleEdge, 1f))
-            using (var path = InfoContext.RoundedRect(new RectangleF(0.5f, 0.5f, w - 1f, h - 1f), h / 2f))
-                g.DrawPath(edge, path);
+            using (var outline = InfoContext.RoundedRect(new RectangleF(0.5f, 0.5f, w - 1f, h - 1f), h / 2f))
+                g.DrawPath(edge, outline);
 
             float fontPx = Math.Max(10f, h * 0.36f);
             using (var font = new Font("JetBrainsMono NF", fontPx, FontStyle.Regular, GraphicsUnit.Pixel))
