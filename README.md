@@ -84,7 +84,7 @@ Windows 11 任务栏没有第三方文字接口，所以用**置顶窗口**覆�
 - 外观：Dracula 深色胶囊（`#1E1F29` + 细边框），JetBrainsMono NF
 - `WM_NCHITTEST -> HTTRANSPARENT`，点击穿透，不影响任务栏
 - 全屏应用时自动隐藏
-- **任务栏只显示当前工作区的窗口**：通过 `ITaskbarList::DeleteTab/AddTab` 把其他工作区的窗口从任务栏移除（托盘菜单可关闭；只处理 komorebi 托管的窗口，未托管窗口不动）
+- **任务栏只显示当前工作区的窗口（实验性，默认关闭）**：通过 `ITaskbarList::DeleteTab/AddTab` 把其他工作区的窗口从任务栏移除。实测在这个 Windows build 上会偶发导致 explorer 崩溃，所以默认不启用，可在托盘菜单里手动打开测试。
 
 同时在 `http://127.0.0.1:17321/` 提供一行纯文本（聚焦屏的工作区、布局、窗口标题），方便 Windhawk 等外部工具读取，例如：
 

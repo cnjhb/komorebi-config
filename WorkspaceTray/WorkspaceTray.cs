@@ -20,7 +20,7 @@ namespace KomorebiTaskbarInfo
     static class Program
     {
         [STAThread]
-        static void Main()
+        static void Main(string[] args)
         {
             bool createdNew;
             using (var mutex = new Mutex(true, @"Global\KomorebiTaskbarInfo", out createdNew))
@@ -29,7 +29,7 @@ namespace KomorebiTaskbarInfo
                 try { Native.SetProcessDpiAwarenessContext(new IntPtr(-4)); } catch { }
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
-                Application.Run(new InfoContext());
+                Application.Run(new InfoContext(args));
             }
         }
     }
@@ -78,7 +78,7 @@ namespace KomorebiTaskbarInfo
         readonly HashSet<long> _hiddenHwnds = new HashSet<long>();
 
         ITaskbarList _taskbarList;
-        bool _filterTaskbar = true;
+        bool _filterTaskbar = false;
         HashSet<long> _lastManaged = new HashSet<long>();
         HashSet<long> _lastVisible = new HashSet<long>();
 
@@ -94,7 +94,7 @@ namespace KomorebiTaskbarInfo
         string _iconTooltip = "";
         bool _iconConnected;
 
-        public InfoContext()
+        public InfoContext(string[] args)
         {
             _marshal = new Control();
             IntPtr forceHandle = _marshal.Handle;
@@ -107,9 +107,9 @@ namespace KomorebiTaskbarInfo
             menu.Items.Add(_statusItem);
             menu.Items.Add(new ToolStripSeparator());
 
-            _filterItem = new ToolStripMenuItem("任务栏只显示当前工作区");
+            _filterItem = new ToolStripMenuItem("任务栏只显示当前工作区（实验性）");
             _filterItem.CheckOnClick = true;
-            _filterItem.Checked = true;
+            _filterItem.Checked = false;
             _filterItem.CheckedChanged += delegate
             {
                 _filterTaskbar = _filterItem.Checked;
