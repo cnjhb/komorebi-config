@@ -80,7 +80,8 @@ Windows 11 任务栏没有第三方文字接口，所以用**置顶窗口**覆�
 
 - 每块屏一个胶囊（`Shell_TrayWnd` / `Shell_SecondaryTrayWnd` 各一个）
 - 通过 `komorebic subscribe-pipe` 订阅状态，切换工作区/窗口时即时刷新
-- 显示：工作区编号（聚焦 = 紫色加粗，有窗口 = 亮色，空 = 暗色）│ 当前窗口标题 │ 布局
+- 显示：工作区编号（聚焦 = 系统强调色加粗，有窗口 = 正常文字色，空 = 半透明）│ 当前窗口标题 │ 布局
+- 外观跟随任务栏：浅/深主题自动切换、Segoe UI Variable 字体、系统强调色、细边框，视觉上和任务栏搜索框一致
 - `WM_NCHITTEST -> HTTRANSPARENT`，点击穿透，不影响任务栏
 - 全屏应用时自动隐藏
 
@@ -90,7 +91,11 @@ Windows 11 任务栏没有第三方文字接口，所以用**置顶窗口**覆�
 [1] 2· 3 4 5 6 7 8 9  ·  BSP  ·  Firefox — 标题…
 ```
 
-实测这个 Windows 版本会把**分层透明窗口**合成到任务栏下面，所以胶囊用不透明深色底 + 圆角窗口区域（`SetWindowRgn`），不能用 per-pixel alpha。
+实测这个 Windows 版本会把**分层透明窗口**合成到任务栏下面，所以胶囊用不透明底色 + 圆角窗口区域（`SetWindowRgn`），不能用 per-pixel alpha；底色直接用任务栏主题色（浅色 `#F9F9F9` / 深色 `#2B2B2B`），配合系统字体和强调色。
+
+### 可选：Windhawk 原生显示
+
+`windhawk/` 里有一个基于 [Taskbar Clock Customization](https://github.com/ramensoftware/windhawk-mods) 的 mod（GPL-3.0），把工作区行直接画在**主屏任务栏时钟区**，1 秒刷新。默认不安装，构建和安装方法见 `windhawk/README.md`。
 
 ### 应用启动器（launch-focused.ps1）
 
