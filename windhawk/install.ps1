@@ -36,9 +36,16 @@ if (-not $isAdmin) {
 
 if ($Uninstall) {
     if (Test-Path $regBase) { Remove-Item $regBase -Recurse -Force }
-    if (Test-Path $destDll) { Remove-Item $destDll -Force }
+    if (Test-Path $destDll) {
+        try { Remove-Item $destDll -Force -ErrorAction Stop }
+        catch { Write-Warning "could not delete leftover DLL (it is inert): $destDll" }
+    }
     Write-Host 'uninstalled'
     Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
+    if (-not (Get-Process explorer -ErrorAction SilentlyContinue)) {
+        Start-Process explorer.exe
+    }
     return
 }
 
@@ -86,4 +93,8 @@ Write-Host "installed $modId $version"
 if ($RestartExplorer) {
     Write-Host 'restarting explorer...'
     Stop-Process -Name explorer -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
+    if (-not (Get-Process explorer -ErrorAction SilentlyContinue)) {
+        Start-Process explorer.exe
+    }
 }
