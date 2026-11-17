@@ -84,6 +84,12 @@ Windows 11 任务栏没有第三方文字接口，所以用**置顶窗口**覆�
 - `WM_NCHITTEST -> HTTRANSPARENT`，点击穿透，不影响任务栏
 - 全屏应用时自动隐藏
 
+同时在 `http://127.0.0.1:17321/` 提供一行纯文本（聚焦屏的工作区、布局、窗口标题），方便 Windhawk 等外部工具读取，例如：
+
+```
+[1] 2· 3 4 5 6 7 8 9  ·  BSP  ·  Firefox — 标题…
+```
+
 实测这个 Windows 版本会把**分层透明窗口**合成到任务栏下面，所以胶囊用不透明深色底 + 圆角窗口区域（`SetWindowRgn`），不能用 per-pixel alpha。
 
 ### 应用启动器（launch-focused.ps1）

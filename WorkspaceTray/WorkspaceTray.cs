@@ -5,6 +5,8 @@ using System.Drawing;
 using System.Drawing.Drawing2D;
 using System.Drawing.Imaging;
 using System.Drawing.Text;
+using System.Net;
+using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
@@ -35,6 +37,7 @@ namespace KomorebiTaskbarInfo
     class InfoContext : ApplicationContext
     {
         const string PipeName = "komorebi-taskbar-info";
+        const int HttpPort = 17321;
         static readonly string Komorebic = System.IO.Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
             "komorebi", "bin", "komorebic.exe");
@@ -55,6 +58,8 @@ namespace KomorebiTaskbarInfo
         readonly Dictionary<string, string> _lastTitle = new Dictionary<string, string>();
 
         Dictionary<string, object> _state;
+        volatile string _webLine = "";
+        TcpListener _http;
         volatile bool _exit;
         bool _fullscreen;
         bool _light = true;
@@ -97,6 +102,10 @@ namespace KomorebiTaskbarInfo
             var worker = new Thread(Worker);
             worker.IsBackground = true;
             worker.Start();
+
+            var http = new Thread(HttpWorker);
+            http.IsBackground = true;
+            http.Start();
 
             Log("started");
         }
@@ -298,6 +307,26 @@ namespace KomorebiTaskbarInfo
                     if (string.IsNullOrEmpty(name)) name = (wsi + 1).ToString();
                     SetTray(name, "komorebi · 工作区 " + name + " · " + strip.DeviceName, true);
                     _statusItem.Text = "工作区 " + name + " · " + strip.DeviceName;
+
+                    var line = new StringBuilder();
+                    for (int i = 0; i < names.Count; i++)
+                    {
+                        string label = string.IsNullOrEmpty(names[i]) ? (i + 1).ToString() : names[i];
+                        if (label.Length > 2) label = (i + 1).ToString();
+                        if (i > 0) line.Append(' ');
+                        if (i == wsi)
+                        {
+                            line.Append('[').Append(label).Append(']');
+                        }
+                        else
+                        {
+                            line.Append(label);
+                            if (i < occupied.Count && occupied[i]) line.Append('\u00B7');
+                        }
+                    }
+                    if (!string.IsNullOrEmpty(layout)) line.Append("  \u00B7  ").Append(layout);
+                    if (!string.IsNullOrEmpty(title)) line.Append("  \u00B7  ").Append(Truncate(title, 60));
+                    _webLine = line.ToString();
                 }
             }
         }
@@ -417,6 +446,69 @@ namespace KomorebiTaskbarInfo
             return path;
         }
 
+        static string Truncate(string text, int max)
+        {
+            if (string.IsNullOrEmpty(text)) return "";
+            if (text.Length <= max) return text;
+            return text.Substring(0, max - 1) + "\u2026";
+        }
+
+        void HttpWorker()
+        {
+            try
+            {
+                _http = new TcpListener(IPAddress.Loopback, HttpPort);
+                _http.Start();
+                Log("http listening on 127.0.0.1:" + HttpPort);
+            }
+            catch (Exception ex)
+            {
+                Log("http start: " + ex.Message);
+                return;
+            }
+
+            while (!_exit)
+            {
+                try
+                {
+                    using (var client = _http.AcceptTcpClient())
+                    {
+                        client.ReceiveTimeout = 2000;
+                        client.SendTimeout = 2000;
+                        using (var stream = client.GetStream())
+                        {
+                            stream.ReadTimeout = 2000;
+                            stream.WriteTimeout = 2000;
+
+                            var buf = new byte[2048];
+                            int total = 0;
+                            while (total < buf.Length)
+                            {
+                                int n;
+                                try { n = stream.Read(buf, total, buf.Length - total); }
+                                catch { break; }
+                                if (n <= 0) break;
+                                total += n;
+                                if (total >= 4 && Encoding.ASCII.GetString(buf, 0, total).Contains("\r\n\r\n")) break;
+                            }
+
+                            byte[] body = Encoding.UTF8.GetBytes(_webLine ?? "");
+                            string header = "HTTP/1.1 200 OK\r\n" +
+                                            "Content-Type: text/plain; charset=utf-8\r\n" +
+                                            "Content-Length: " + body.Length + "\r\n" +
+                                            "Cache-Control: no-store\r\n" +
+                                            "Connection: close\r\n\r\n";
+                            byte[] head = Encoding.ASCII.GetBytes(header);
+                            stream.Write(head, 0, head.Length);
+                            stream.Write(body, 0, body.Length);
+                            stream.Flush();
+                        }
+                    }
+                }
+                catch { }
+            }
+        }
+
         void Worker()
         {
             while (!_exit)
@@ -511,6 +603,7 @@ namespace KomorebiTaskbarInfo
         void ExitApp()
         {
             _exit = true;
+            try { if (_http != null) _http.Stop(); } catch { }
             try { _timer.Stop(); } catch { }
             try { _tray.Visible = false; _tray.Dispose(); } catch { }
             foreach (var s in _strips)
