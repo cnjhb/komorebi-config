@@ -34,6 +34,24 @@ namespace KomorebiTaskbarInfo
         }
     }
 
+    [ComImport]
+    [Guid("56FDF344-FD6D-11d0-958A-006097C9A090")]
+    internal class CTaskbarList
+    {
+    }
+
+    [ComImport]
+    [Guid("56FDF342-FD6D-11d0-958A-006097C9A090")]
+    [InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+    internal interface ITaskbarList
+    {
+        void HrInit();
+        void AddTab(IntPtr hwnd);
+        void DeleteTab(IntPtr hwnd);
+        void ActivateTab(IntPtr hwnd);
+        void SetActiveAlt(IntPtr hwnd);
+    }
+
     class InfoContext : ApplicationContext
     {
         const string PipeName = "komorebi-taskbar-info";
@@ -52,10 +70,17 @@ namespace KomorebiTaskbarInfo
         readonly List<Strip> _strips = new List<Strip>();
         readonly NotifyIcon _tray;
         readonly ToolStripMenuItem _statusItem;
+        readonly ToolStripMenuItem _filterItem;
         readonly System.Windows.Forms.Timer _timer;
         readonly Control _marshal;
         readonly object _sync = new object();
         readonly Dictionary<string, string> _lastTitle = new Dictionary<string, string>();
+        readonly HashSet<long> _hiddenHwnds = new HashSet<long>();
+
+        ITaskbarList _taskbarList;
+        bool _filterTaskbar = true;
+        HashSet<long> _lastManaged = new HashSet<long>();
+        HashSet<long> _lastVisible = new HashSet<long>();
 
         Dictionary<string, object> _state;
         volatile string _webLine = "";
@@ -81,6 +106,18 @@ namespace KomorebiTaskbarInfo
             var menu = new ContextMenuStrip();
             menu.Items.Add(_statusItem);
             menu.Items.Add(new ToolStripSeparator());
+
+            _filterItem = new ToolStripMenuItem("任务栏只显示当前工作区");
+            _filterItem.CheckOnClick = true;
+            _filterItem.Checked = true;
+            _filterItem.CheckedChanged += delegate
+            {
+                _filterTaskbar = _filterItem.Checked;
+                ApplyTaskbarFilter();
+            };
+            menu.Items.Add(_filterItem);
+            menu.Items.Add(new ToolStripSeparator());
+
             var restart = new ToolStripMenuItem("重启 komorebi");
             restart.Click += delegate { RestartKomorebi(); };
             menu.Items.Add(restart);
@@ -92,6 +129,28 @@ namespace KomorebiTaskbarInfo
             _tray.ContextMenuStrip = menu;
             _tray.Visible = true;
             SetTray("?", "komorebi · 正在连接", false);
+
+            try
+            {
+                _taskbarList = (ITaskbarList)new CTaskbarList();
+                Log("taskbar list created");
+                try
+                {
+                    _taskbarList.HrInit();
+                    Log("taskbar HrInit ok");
+                }
+                catch (Exception hex)
+                {
+                    Log("taskbar HrInit failed: " + hex.Message);
+                }
+            }
+            catch (Exception ex)
+            {
+                Log("taskbar list: " + ex.Message);
+                _taskbarList = null;
+                _filterItem.Enabled = false;
+                _filterItem.Checked = false;
+            }
 
             BuildStrips();
 
@@ -139,7 +198,7 @@ namespace KomorebiTaskbarInfo
             catch { }
         }
 
-        void BuildStrips()
+        static List<IntPtr> GetTaskbars()
         {
             var taskbars = new List<IntPtr>();
             IntPtr primary = Native.FindWindow("Shell_TrayWnd", null);
@@ -149,6 +208,47 @@ namespace KomorebiTaskbarInfo
             while ((h = Native.FindWindowEx(IntPtr.Zero, h, "Shell_SecondaryTrayWnd", null)) != IntPtr.Zero)
                 taskbars.Add(h);
 
+            return taskbars;
+        }
+
+        void BuildStrips()
+        {
+            foreach (var tb in GetTaskbars())
+            {
+                string device = Native.MonitorDeviceOf(tb);
+                if (string.IsNullOrEmpty(device)) continue;
+                var strip = new Strip(tb, device, tb == Native.FindWindow("Shell_TrayWnd", null));
+                strip.Show();
+                _strips.Add(strip);
+                Log("strip " + device + " bounds=" + strip.CurrentBounds);
+            }
+        }
+
+        // explorer restarts recreate the taskbar windows (and re-add every
+        // taskbar button). Rebuild the strips and let the filter re-apply.
+        void RebuildStrips()
+        {
+            var taskbars = GetTaskbars();
+            bool same = taskbars.Count == _strips.Count;
+            if (same)
+            {
+                for (int i = 0; i < taskbars.Count; i++)
+                {
+                    if (taskbars[i] != _strips[i].TaskbarHandle) { same = false; break; }
+                }
+            }
+            if (same) return;
+
+            foreach (var s in _strips)
+            {
+                try { s.Close(); s.Dispose(); } catch { }
+            }
+            _strips.Clear();
+            _hiddenHwnds.Clear();
+
+            try { _tray.Visible = false; _tray.Visible = true; } catch { }
+
+            IntPtr primary = Native.FindWindow("Shell_TrayWnd", null);
             foreach (var tb in taskbars)
             {
                 string device = Native.MonitorDeviceOf(tb);
@@ -156,14 +256,15 @@ namespace KomorebiTaskbarInfo
                 var strip = new Strip(tb, device, tb == primary);
                 strip.Show();
                 _strips.Add(strip);
-                Log("strip " + device + " bounds=" + strip.CurrentBounds);
             }
+            Log("strips rebuilt: " + _strips.Count);
         }
 
         void Tick()
         {
             try
             {
+                RebuildStrips();
                 ReadTheme();
 
                 bool fullscreen = IsFullscreenForeground();
@@ -216,6 +317,69 @@ namespace KomorebiTaskbarInfo
             var mons = AsArray(monitors, "elements");
             if (mons == null) return;
 
+            // Taskbar filter: a managed window is visible when it sits on its
+            // monitor's focused workspace. Unmanaged windows are not in the
+            // komorebi state and are left alone.
+            var managed = new HashSet<long>();
+            var visible = new HashSet<long>();
+            for (int i = 0; i < mons.Length; i++)
+            {
+                var mon = AsDict(mons[i]);
+                if (mon == null) continue;
+                var ws = AsDict(mon, "workspaces");
+                if (ws == null) continue;
+                var wss = AsArray(ws, "elements");
+                if (wss == null) continue;
+
+                int focusedWs = 0;
+                try { focusedWs = Convert.ToInt32(ws["focused"]); } catch { }
+
+                for (int j = 0; j < wss.Length; j++)
+                {
+                    var w = AsDict(wss[j]);
+                    if (w == null) continue;
+
+                    var containers = AsDict(w, "containers");
+                    var containerEls = containers == null ? null : AsArray(containers, "elements");
+                    if (containerEls != null)
+                    {
+                        foreach (var c in containerEls)
+                        {
+                            var cDict = AsDict(c);
+                            var winObj = cDict == null ? null : AsDict(cDict, "windows");
+                            var wins = winObj == null ? null : AsArray(winObj, "elements");
+                            if (wins == null) continue;
+                            foreach (var win in wins)
+                            {
+                                var d = AsDict(win);
+                                if (d == null) continue;
+                                long hwnd = Convert.ToInt64(d["hwnd"]);
+                                managed.Add(hwnd);
+                                if (j == focusedWs) visible.Add(hwnd);
+                            }
+                        }
+                    }
+
+                    var floating = AsDict(w, "floating_windows");
+                    var floatingEls = floating == null ? null : AsArray(floating, "elements");
+                    if (floatingEls != null)
+                    {
+                        foreach (var win in floatingEls)
+                        {
+                            var d = AsDict(win);
+                            if (d == null) continue;
+                            long hwnd = Convert.ToInt64(d["hwnd"]);
+                            managed.Add(hwnd);
+                            if (j == focusedWs) visible.Add(hwnd);
+                        }
+                    }
+                }
+            }
+
+            _lastManaged = managed;
+            _lastVisible = visible;
+            ApplyTaskbarFilter();
+
             IntPtr fg = Native.GetForegroundWindow();
             string fgMonitor = null;
             string fgTitle = null;
@@ -234,7 +398,8 @@ namespace KomorebiTaskbarInfo
                     for (int k = 0; k < cs.Length && fgMonitor == null; k++)
                     {
                         var c = AsDict(cs[k]);
-                        var wins = c == null ? null : AsArray(c, "windows");
+                        var winObj = c == null ? null : AsDict(c, "windows");
+                        var wins = winObj == null ? null : AsArray(winObj, "elements");
                         if (wins == null) continue;
                         for (int m = 0; m < wins.Length; m++)
                         {
@@ -335,6 +500,60 @@ namespace KomorebiTaskbarInfo
                     if (string.IsNullOrEmpty(name)) name = (wsi + 1).ToString();
                     SetTray(name, "komorebi · 工作区 " + name + " · " + strip.DeviceName, true);
                     _statusItem.Text = "工作区 " + name + " · " + strip.DeviceName;
+                }
+            }
+        }
+
+        void ApplyTaskbarFilter()
+        {
+            if (_taskbarList == null) return;
+
+            if (!_filterTaskbar)
+            {
+                foreach (var hwnd in new List<long>(_hiddenHwnds))
+                {
+                    try { _taskbarList.AddTab(new IntPtr(hwnd)); }
+                    catch (Exception ex) { Log("taskbar show failed " + hwnd + ": " + ex.Message); }
+                }
+                _hiddenHwnds.Clear();
+                return;
+            }
+
+            // Forget windows that no longer exist.
+            var gone = new List<long>();
+            foreach (var hwnd in _hiddenHwnds)
+            {
+                if (!_lastManaged.Contains(hwnd)) gone.Add(hwnd);
+            }
+            foreach (var hwnd in gone) _hiddenHwnds.Remove(hwnd);
+
+            foreach (var hwnd in _lastManaged)
+            {
+                bool shouldShow = _lastVisible.Contains(hwnd);
+                bool hidden = _hiddenHwnds.Contains(hwnd);
+
+                if (shouldShow)
+                {
+                    if (hidden)
+                    {
+                        try
+                        {
+                            _taskbarList.AddTab(new IntPtr(hwnd));
+                            _hiddenHwnds.Remove(hwnd);
+                            Log("taskbar show " + hwnd);
+                        }
+                        catch (Exception ex) { Log("taskbar show failed " + hwnd + ": " + ex.Message); }
+                    }
+                }
+                else if (!hidden)
+                {
+                    try
+                    {
+                        _taskbarList.DeleteTab(new IntPtr(hwnd));
+                        _hiddenHwnds.Add(hwnd);
+                        Log("taskbar hide " + hwnd);
+                    }
+                    catch (Exception ex) { Log("taskbar hide failed " + hwnd + ": " + ex.Message); }
                 }
             }
         }
@@ -616,6 +835,14 @@ namespace KomorebiTaskbarInfo
         void ExitApp()
         {
             _exit = true;
+            if (_taskbarList != null)
+            {
+                foreach (var hwnd in _hiddenHwnds)
+                {
+                    try { _taskbarList.AddTab(new IntPtr(hwnd)); } catch { }
+                }
+                _hiddenHwnds.Clear();
+            }
             try { if (_http != null) _http.Stop(); } catch { }
             try { _timer.Stop(); } catch { }
             try { _tray.Visible = false; _tray.Dispose(); } catch { }
@@ -658,6 +885,7 @@ namespace KomorebiTaskbarInfo
         bool _rendered;
 
         public Rectangle CurrentBounds { get { return _bounds; } }
+        public IntPtr TaskbarHandle { get { return _taskbar; } }
 
         public Strip(IntPtr taskbar, string device, bool primary)
         {
