@@ -629,13 +629,15 @@ namespace KomorebiTaskbarInfo
 
     class Strip : Form
     {
-        // Dracula-ish palette (works on the light Windows 11 taskbar as a dark capsule)
-        Color _bg;
-        Color _text;
-        Color _textDim;
-        Color _accent;
-        Color _separator;
-        Color _border;
+        // Dracula palette for the capsule
+        static readonly Color Capsule = Color.FromArgb(255, 0x1E, 0x1F, 0x29);
+        static readonly Color CapsuleEdge = Color.FromArgb(255, 0x33, 0x36, 0x4A);
+        static readonly Color TextOccupied = Color.FromArgb(255, 0xD6, 0xDB, 0xE8);
+        static readonly Color TextEmpty = Color.FromArgb(255, 0x4A, 0x50, 0x64);
+        static readonly Color TextActive = Color.FromArgb(255, 0xBD, 0x93, 0xF9);
+        static readonly Color TextTitle = Color.FromArgb(255, 0xF8, 0xF8, 0xF2);
+        static readonly Color TextDim = Color.FromArgb(255, 0x62, 0x72, 0xA4);
+        static readonly Color Separator = Color.FromArgb(255, 0x44, 0x47, 0x5A);
 
         readonly IntPtr _taskbar;
         readonly bool _primary;
@@ -663,81 +665,10 @@ namespace KomorebiTaskbarInfo
             StartPosition = FormStartPosition.Manual;
             AutoScaleMode = AutoScaleMode.None;
             TopMost = true;
-            BackColor = Color.FromArgb(255, 32, 32, 32);
+            BackColor = Capsule;
             SetStyle(ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint, true);
             _bounds = new Rectangle(0, 0, 1, 1);
-            _bg = IsLightTheme() ? Color.FromArgb(255, 249, 249, 249) : Color.FromArgb(255, 43, 43, 43);
-            UpdateColors();
             RefreshBounds();
-        }
-
-        static bool IsLightTheme()
-        {
-            try
-            {
-                using (var key = Registry.CurrentUser.OpenSubKey(
-                    @"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"))
-                {
-                    if (key != null)
-                    {
-                        var v = key.GetValue("SystemUsesLightTheme");
-                        if (v is int) return (int)v != 0;
-                    }
-                }
-            }
-            catch { }
-            return true;
-        }
-
-        static Color SystemAccent()
-        {
-            try
-            {
-                using (var key = Registry.CurrentUser.OpenSubKey(@"Software\Microsoft\Windows\DWM"))
-                {
-                    if (key != null)
-                    {
-                        var v = key.GetValue("AccentColor");
-                        if (v is int)
-                        {
-                            int abgr = (int)v;
-                            return Color.FromArgb(255, abgr & 0xFF, (abgr >> 8) & 0xFF, (abgr >> 16) & 0xFF);
-                        }
-                    }
-                }
-            }
-            catch { }
-            return Color.FromArgb(255, 0, 120, 212);
-        }
-
-        void UpdateColors()
-        {
-            double lum = 0.299 * _bg.R + 0.587 * _bg.G + 0.114 * _bg.B;
-            bool light = lum > 128;
-            _text = light ? Color.FromArgb(255, 28, 28, 28) : Color.FromArgb(255, 245, 245, 245);
-            _textDim = Color.FromArgb(110, _text);
-            _separator = Color.FromArgb(60, _text);
-            _border = light ? Color.FromArgb(255, 226, 226, 226) : Color.FromArgb(255, 58, 58, 58);
-
-            var accent = SystemAccent();
-            // Keep the accent readable against the pill background.
-            double aLum = 0.299 * accent.R + 0.587 * accent.G + 0.114 * accent.B;
-            if (light && aLum > 170) accent = Darken(accent, 0.72);
-            if (!light && aLum < 90) accent = Lighten(accent, 0.45);
-            _accent = accent;
-        }
-
-        static Color Darken(Color c, double f)
-        {
-            return Color.FromArgb(c.A, (int)(c.R * f), (int)(c.G * f), (int)(c.B * f));
-        }
-
-        static Color Lighten(Color c, double f)
-        {
-            return Color.FromArgb(c.A,
-                (int)(c.R + (255 - c.R) * f),
-                (int)(c.G + (255 - c.G) * f),
-                (int)(c.B + (255 - c.B) * f));
         }
 
         protected override CreateParams CreateParams
@@ -775,13 +706,13 @@ namespace KomorebiTaskbarInfo
                 if (Native.GetWindowRect(start, out sr)) startLeft = sr.Left;
             }
 
-            int inset = 10;
+            int inset = 4;
             int left = _primary && WidgetsOn() ? 200 : 8;
             int maxWidth = startLeft - 8 - left;
             int height = tr.Bottom - tr.Top - inset * 2;
             if (maxWidth < 140 || height < 20) return;
 
-            float fontPx = Math.Max(10f, height * 0.30f);
+            float fontPx = Math.Max(10f, height * 0.36f);
             float pad = Math.Max(10f, height * 0.22f);
             float step = fontPx * 1.10f;
 
@@ -890,20 +821,20 @@ namespace KomorebiTaskbarInfo
         {
             g.SmoothingMode = SmoothingMode.AntiAlias;
             g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
-            g.Clear(_bg);
+            g.Clear(Capsule);
 
-            using (var edge = new Pen(_border, 1f))
+            using (var edge = new Pen(CapsuleEdge, 1f))
             using (var path = InfoContext.RoundedRect(new RectangleF(0.5f, 0.5f, w - 1f, h - 1f), h / 2f))
                 g.DrawPath(edge, path);
 
-            float fontPx = Math.Max(10f, h * 0.30f);
-            using (var font = new Font("Segoe UI Variable Text", fontPx, FontStyle.Regular, GraphicsUnit.Pixel))
-            using (var bold = new Font("Segoe UI Variable Text", fontPx, FontStyle.Bold, GraphicsUnit.Pixel))
-            using (var occupiedBrush = new SolidBrush(_text))
-            using (var emptyBrush = new SolidBrush(_textDim))
-            using (var activeBrush = new SolidBrush(_accent))
-            using (var titleBrush = new SolidBrush(_text))
-            using (var dimBrush = new SolidBrush(_textDim))
+            float fontPx = Math.Max(10f, h * 0.36f);
+            using (var font = new Font("JetBrainsMono NF", fontPx, FontStyle.Regular, GraphicsUnit.Pixel))
+            using (var bold = new Font("JetBrainsMono NF", fontPx, FontStyle.Bold, GraphicsUnit.Pixel))
+            using (var occupiedBrush = new SolidBrush(TextOccupied))
+            using (var emptyBrush = new SolidBrush(TextEmpty))
+            using (var activeBrush = new SolidBrush(TextActive))
+            using (var titleBrush = new SolidBrush(TextTitle))
+            using (var dimBrush = new SolidBrush(TextDim))
             using (var sfCenter = new StringFormat())
             using (var sfTitle = new StringFormat())
             using (var sfRight = new StringFormat())
@@ -940,8 +871,8 @@ namespace KomorebiTaskbarInfo
                 }
 
                 x += pad * 0.6f;
-                using (var pen = new Pen(_separator, 1f))
-                    g.DrawLine(pen, x, h * 0.28f, x, h * 0.72f);
+                using (var pen = new Pen(Separator, 1f))
+                    g.DrawLine(pen, x, h * 0.3f, x, h * 0.7f);
                 x += pad * 0.8f;
 
                 float layoutWidth = 0f;
