@@ -29,6 +29,19 @@ namespace KomorebiTaskbarInfo
                 try { Native.SetProcessDpiAwarenessContext(new IntPtr(-4)); } catch { }
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
+
+                // Never let a drawing/threading hiccup take the whole strip
+                // down with the WinForms crash dialog: log it and keep going.
+                Application.SetUnhandledExceptionMode(UnhandledExceptionMode.CatchException);
+                Application.ThreadException += delegate(object sender, ThreadExceptionEventArgs e)
+                {
+                    InfoContext.Log("UI exception: " + e.Exception);
+                };
+                AppDomain.CurrentDomain.UnhandledException += delegate(object sender, UnhandledExceptionEventArgs e)
+                {
+                    InfoContext.Log("fatal: " + e.ExceptionObject);
+                };
+
                 Application.Run(new InfoContext(args));
             }
         }
@@ -83,6 +96,7 @@ namespace KomorebiTaskbarInfo
         HashSet<long> _lastVisible = new HashSet<long>();
 
         Dictionary<string, object> _state;
+        int _tick;
         volatile string _webLine = "";
         volatile string _webLineFull = "";
         TcpListener _http;
@@ -155,7 +169,7 @@ namespace KomorebiTaskbarInfo
             BuildStrips();
 
             _timer = new System.Windows.Forms.Timer();
-            _timer.Interval = 400;
+            _timer.Interval = 1000;
             _timer.Tick += delegate { Tick(); };
             _timer.Start();
 
@@ -264,17 +278,22 @@ namespace KomorebiTaskbarInfo
         {
             try
             {
-                RebuildStrips();
-                ReadTheme();
+                _tick++;
+
+                // Taskbar windows and the Windows theme change rarely, so they
+                // are polled on a slower cadence; komorebi state still arrives
+                // as events, so the capsule itself updates instantly.
+                if (_tick % 3 == 1) RebuildStrips();
+                if (_tick % 5 == 1) ReadTheme();
 
                 bool fullscreen = IsFullscreenForeground();
                 if (fullscreen != _fullscreen)
                 {
                     _fullscreen = fullscreen;
-                    foreach (var s in _strips) s.Visible = !_fullscreen;
+                    foreach (var s in _strips.ToArray()) s.Visible = !_fullscreen;
                 }
 
-                foreach (var s in _strips)
+                foreach (var s in _strips.ToArray())
                 {
                     if (!s.Visible) continue;
                     s.RefreshBounds();
@@ -319,37 +338,55 @@ namespace KomorebiTaskbarInfo
 
             // Taskbar filter: a managed window is visible when it sits on its
             // monitor's focused workspace. Unmanaged windows are not in the
-            // komorebi state and are left alone.
-            var managed = new HashSet<long>();
-            var visible = new HashSet<long>();
-            for (int i = 0; i < mons.Length; i++)
+            // komorebi state and are left alone. Nothing to do while the
+            // experimental filter is off.
+            if (_filterTaskbar)
             {
-                var mon = AsDict(mons[i]);
-                if (mon == null) continue;
-                var ws = AsDict(mon, "workspaces");
-                if (ws == null) continue;
-                var wss = AsArray(ws, "elements");
-                if (wss == null) continue;
-
-                int focusedWs = 0;
-                try { focusedWs = Convert.ToInt32(ws["focused"]); } catch { }
-
-                for (int j = 0; j < wss.Length; j++)
+                var managed = new HashSet<long>();
+                var visible = new HashSet<long>();
+                for (int i = 0; i < mons.Length; i++)
                 {
-                    var w = AsDict(wss[j]);
-                    if (w == null) continue;
+                    var mon = AsDict(mons[i]);
+                    if (mon == null) continue;
+                    var ws = AsDict(mon, "workspaces");
+                    if (ws == null) continue;
+                    var wss = AsArray(ws, "elements");
+                    if (wss == null) continue;
 
-                    var containers = AsDict(w, "containers");
-                    var containerEls = containers == null ? null : AsArray(containers, "elements");
-                    if (containerEls != null)
+                    int focusedWs = 0;
+                    try { focusedWs = Convert.ToInt32(ws["focused"]); } catch { }
+
+                    for (int j = 0; j < wss.Length; j++)
                     {
-                        foreach (var c in containerEls)
+                        var w = AsDict(wss[j]);
+                        if (w == null) continue;
+
+                        var containers = AsDict(w, "containers");
+                        var containerEls = containers == null ? null : AsArray(containers, "elements");
+                        if (containerEls != null)
                         {
-                            var cDict = AsDict(c);
-                            var winObj = cDict == null ? null : AsDict(cDict, "windows");
-                            var wins = winObj == null ? null : AsArray(winObj, "elements");
-                            if (wins == null) continue;
-                            foreach (var win in wins)
+                            foreach (var c in containerEls)
+                            {
+                                var cDict = AsDict(c);
+                                var winObj = cDict == null ? null : AsDict(cDict, "windows");
+                                var wins = winObj == null ? null : AsArray(winObj, "elements");
+                                if (wins == null) continue;
+                                foreach (var win in wins)
+                                {
+                                    var d = AsDict(win);
+                                    if (d == null) continue;
+                                    long hwnd = Convert.ToInt64(d["hwnd"]);
+                                    managed.Add(hwnd);
+                                    if (j == focusedWs) visible.Add(hwnd);
+                                }
+                            }
+                        }
+
+                        var floating = AsDict(w, "floating_windows");
+                        var floatingEls = floating == null ? null : AsArray(floating, "elements");
+                        if (floatingEls != null)
+                        {
+                            foreach (var win in floatingEls)
                             {
                                 var d = AsDict(win);
                                 if (d == null) continue;
@@ -359,26 +396,12 @@ namespace KomorebiTaskbarInfo
                             }
                         }
                     }
-
-                    var floating = AsDict(w, "floating_windows");
-                    var floatingEls = floating == null ? null : AsArray(floating, "elements");
-                    if (floatingEls != null)
-                    {
-                        foreach (var win in floatingEls)
-                        {
-                            var d = AsDict(win);
-                            if (d == null) continue;
-                            long hwnd = Convert.ToInt64(d["hwnd"]);
-                            managed.Add(hwnd);
-                            if (j == focusedWs) visible.Add(hwnd);
-                        }
-                    }
                 }
-            }
 
-            _lastManaged = managed;
-            _lastVisible = visible;
-            ApplyTaskbarFilter();
+                _lastManaged = managed;
+                _lastVisible = visible;
+                ApplyTaskbarFilter();
+            }
 
             IntPtr fg = Native.GetForegroundWindow();
             string fgMonitor = null;
@@ -419,7 +442,7 @@ namespace KomorebiTaskbarInfo
             int focusedMonitor = 0;
             try { focusedMonitor = Convert.ToInt32(monitors["focused"]); } catch { }
 
-            foreach (var strip in _strips)
+            foreach (var strip in _strips.ToArray())
             {
                 int mi = -1;
                 for (int i = 0; i < mons.Length; i++)
@@ -694,6 +717,11 @@ namespace KomorebiTaskbarInfo
             // Clamp the arc diameter: a radius larger than half the shorter side
             // makes the arcs overlap and the outline degenerates into a square.
             float d = Math.Min(radius * 2f, Math.Min(r.Width, r.Height));
+            if (d < 1f || r.Width < 1f || r.Height < 1f)
+            {
+                path.AddRectangle(r);
+                return path;
+            }
             path.AddArc(r.X, r.Y, d, d, 180, 90);
             path.AddArc(r.Right - d, r.Y, d, d, 270, 90);
             path.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
@@ -914,6 +942,9 @@ namespace KomorebiTaskbarInfo
         string _layout = "";
         bool _light = true;
         bool _monitorFocused;
+        int _refreshCount;
+        bool _paintOk;
+        int _paintFailures;
         Rectangle _bounds;
         bool _rendered;
 
@@ -1067,8 +1098,19 @@ namespace KomorebiTaskbarInfo
                            desired.X != _bounds.X || desired.Y != _bounds.Y;
             _bounds = desired;
 
-            Native.SetWindowPos(Handle, Native.HWND_TOPMOST, desired.X, desired.Y, desired.Width, desired.Height,
-                Native.SWP_NOACTIVATE | Native.SWP_SHOWWINDOW);
+            _refreshCount++;
+            if (changed || !_rendered)
+            {
+                Native.SetWindowPos(Handle, Native.HWND_TOPMOST, desired.X, desired.Y, desired.Width, desired.Height,
+                    Native.SWP_NOACTIVATE | Native.SWP_SHOWWINDOW);
+            }
+            else if (_refreshCount % 5 == 0)
+            {
+                // Re-assert topmost every few ticks so we stay above other
+                // always-on-top windows, without a SetWindowPos on every tick.
+                Native.SetWindowPos(Handle, Native.HWND_TOPMOST, 0, 0, 0, 0,
+                    Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE | Native.SWP_SHOWWINDOW);
+            }
 
             SampleBackground(tr, startLeft);
 
@@ -1144,15 +1186,41 @@ namespace KomorebiTaskbarInfo
 
         protected override void OnPaint(PaintEventArgs e)
         {
-            RenderInto(e.Graphics, _bounds.Width, _bounds.Height);
+            try
+            {
+                int w = _bounds.Width;
+                int h = _bounds.Height;
+                if (w <= 1 || h <= 1)
+                {
+                    e.Graphics.Clear(_bgMid);
+                    _paintOk = false;
+                    return;
+                }
+                RenderInto(e.Graphics, w, h);
+                _paintOk = true;
+            }
+            catch (Exception ex)
+            {
+                // WinForms swallows paint exceptions and paints a red X that
+                // stays on screen until something forces a repaint. Log the
+                // real error and fall back to a flat capsule colour instead.
+                _paintOk = false;
+                _paintFailures++;
+                if (_paintFailures <= 5 || _paintFailures % 60 == 0)
+                    InfoContext.Log("paint #" + _paintFailures + ": " + ex);
+                try { e.Graphics.Clear(_bgMid); } catch { }
+            }
         }
 
         void Render()
         {
             if (_bounds.Width <= 0 || _bounds.Height <= 0) return;
+            _paintOk = false;
             Invalidate();
             Update();
-            _rendered = true;
+            // A failed paint is retried by the next tick instead of leaving the
+            // red X (or a stale frame) on the taskbar until the model changes.
+            _rendered = _paintOk;
         }
 
         void RenderInto(Graphics g, int w, int h)
