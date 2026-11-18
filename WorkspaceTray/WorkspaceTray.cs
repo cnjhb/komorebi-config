@@ -451,7 +451,7 @@ namespace KomorebiTaskbarInfo
                 if (wsi >= 0 && wsi < wss.Length)
                 {
                     var focusedWs = AsDict(wss[wsi]);
-                    if (focusedWs != null) layout = LayoutName(focusedWs["layout"]);
+                    if (focusedWs != null) layout = DescribeLayout(focusedWs);
                 }
 
                 string title = "";
@@ -485,9 +485,15 @@ namespace KomorebiTaskbarInfo
                 }
                 if (!string.IsNullOrEmpty(layout)) line.Append("  \u00B7  ").Append(layout);
 
+                if (layout != strip.LastLayoutLog)
+                {
+                    strip.LastLayoutLog = layout;
+                    Log("layout " + strip.DeviceName + " ws=" + wsi + " " + layout);
+                }
+
                 // The taskbar clock lives on the primary monitor's taskbar, so
-                // "/" serves that monitor (index 0) rather than the focused one.
-                if (mi == 0)
+                // "/" serves that monitor rather than the focused one.
+                if (strip.IsPrimary)
                 {
                     _webLine = line.ToString();
                     if (!string.IsNullOrEmpty(title)) line.Append("  \u00B7  ").Append(Truncate(title, 80));
@@ -591,6 +597,27 @@ namespace KomorebiTaskbarInfo
             if (d.TryGetValue("Default", out v)) return Convert.ToString(v);
             foreach (var kv in d) return kv.Key;
             return "";
+        }
+
+        // The layout widget should reflect monocle/maximized/floating too:
+        // toggle-monocle does not change the workspace's layout field.
+        static string DescribeLayout(Dictionary<string, object> ws)
+        {
+            if (ws == null) return "";
+
+            object v;
+            if (ws.TryGetValue("monocle_container", out v) && v != null) return "Monocle";
+            if (ws.TryGetValue("maximized_window", out v) && v != null) return "Max";
+
+            object layer;
+            if (ws.TryGetValue("layer", out layer) &&
+                string.Equals(Convert.ToString(layer), "Floating", StringComparison.OrdinalIgnoreCase))
+            {
+                return "Float";
+            }
+
+            object layout;
+            return ws.TryGetValue("layout", out layout) ? LayoutName(layout) : "";
         }
 
         static bool IsWorkspaceOccupied(Dictionary<string, object> ws)
@@ -886,6 +913,8 @@ namespace KomorebiTaskbarInfo
 
         public Rectangle CurrentBounds { get { return _bounds; } }
         public IntPtr TaskbarHandle { get { return _taskbar; } }
+        public bool IsPrimary { get { return _primary; } }
+        public string LastLayoutLog = "";
 
         public Strip(IntPtr taskbar, string device, bool primary)
         {
@@ -1018,11 +1047,14 @@ namespace KomorebiTaskbarInfo
             float pad = Math.Max(10f, height * 0.22f);
             float step = fontPx * 1.10f;
 
+            // A fixed layout slot keeps the capsule width stable across
+            // BSP/Columns/Monocle/Max/Float changes.
+            float layoutSlot = EstimateTextWidth("Monocle", fontPx) + pad;
+
             float content = pad + _names.Count * step + pad * 1.4f;
             if (!string.IsNullOrEmpty(_title))
                 content += Math.Min(360f, EstimateTextWidth(_title, fontPx));
-            if (!string.IsNullOrEmpty(_layout))
-                content += EstimateTextWidth(_layout, fontPx) + pad;
+            content += layoutSlot;
 
             int width = Math.Min(maxWidth, Math.Max(140, (int)Math.Ceiling(content + pad)));
 
@@ -1099,6 +1131,8 @@ namespace KomorebiTaskbarInfo
             _layout = layout;
             _light = light;
             _occupied = occupied;
+
+            RefreshBounds();
             Render();
         }
 
@@ -1188,16 +1222,14 @@ namespace KomorebiTaskbarInfo
                     g.DrawLine(pen, x, h * 0.3f, x, h * 0.7f);
                 x += pad * 0.8f;
 
-                float layoutWidth = 0f;
+                float layoutSlot = EstimateTextWidth("Monocle", fontPx) + pad;
                 if (!string.IsNullOrEmpty(_layout))
                 {
-                    layoutWidth = g.MeasureString(_layout, font).Width;
                     g.DrawString(_layout, font, dimBrush,
-                        new RectangleF(w - pad - layoutWidth - 2, 0, layoutWidth + 2, h), sfRight);
-                    layoutWidth += pad;
+                        new RectangleF(w - pad - layoutSlot, 0, layoutSlot, h), sfRight);
                 }
 
-                float titleRight = w - pad - layoutWidth;
+                float titleRight = w - pad - layoutSlot;
                 float titleWidth = titleRight - x;
                 if (titleWidth > 30 && !string.IsNullOrEmpty(_title))
                 {
