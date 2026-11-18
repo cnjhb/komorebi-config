@@ -92,11 +92,13 @@ namespace KomorebiTaskbarInfo
 
         ITaskbarList _taskbarList;
         bool _filterTaskbar = false;
+        bool _watchWhkd = true;
         HashSet<long> _lastManaged = new HashSet<long>();
         HashSet<long> _lastVisible = new HashSet<long>();
 
         Dictionary<string, object> _state;
         int _tick;
+        DateTime _lastWhkdStart = DateTime.MinValue;
         volatile string _webLine = "";
         volatile string _webLineFull = "";
         TcpListener _http;
@@ -130,6 +132,12 @@ namespace KomorebiTaskbarInfo
                 ApplyTaskbarFilter();
             };
             menu.Items.Add(_filterItem);
+
+            var watchWhkd = new ToolStripMenuItem("whkd 退出后自动重启");
+            watchWhkd.CheckOnClick = true;
+            watchWhkd.Checked = true;
+            watchWhkd.CheckedChanged += delegate { _watchWhkd = watchWhkd.Checked; };
+            menu.Items.Add(watchWhkd);
             menu.Items.Add(new ToolStripSeparator());
 
             var restart = new ToolStripMenuItem("重启 komorebi");
@@ -284,7 +292,7 @@ namespace KomorebiTaskbarInfo
                 // are polled on a slower cadence; komorebi state still arrives
                 // as events, so the capsule itself updates instantly.
                 if (_tick % 3 == 1) RebuildStrips();
-                if (_tick % 5 == 1) ReadTheme();
+                if (_tick % 5 == 1) { ReadTheme(); EnsureWhkd(); }
 
                 bool fullscreen = IsFullscreenForeground();
                 if (fullscreen != _fullscreen)
@@ -304,6 +312,37 @@ namespace KomorebiTaskbarInfo
             catch (Exception ex)
             {
                 Log("tick: " + ex.Message);
+            }
+        }
+
+        // whkd provides every keybinding, but it has no supervision of its own:
+        // the "restart whkd" binding kills it from a child shell and, if whkd
+        // keeps its children in a job object, the replacement never launches.
+        // Shortcuts then stay dead until the next login, so keep an eye on it.
+        void EnsureWhkd()
+        {
+            try
+            {
+                if (!_watchWhkd) return;
+                if (Process.GetProcessesByName("whkd").Length > 0) return;
+                if ((DateTime.Now - _lastWhkdStart).TotalSeconds < 20) return;
+
+                string whkd = System.IO.Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
+                    "whkd", "bin", "whkd.exe");
+                if (!System.IO.File.Exists(whkd)) return;
+
+                _lastWhkdStart = DateTime.Now;
+                var psi = new ProcessStartInfo(whkd);
+                psi.UseShellExecute = false;
+                psi.CreateNoWindow = true;
+                psi.WindowStyle = ProcessWindowStyle.Hidden;
+                Process.Start(psi);
+                Log("whkd was not running, restarted");
+            }
+            catch (Exception ex)
+            {
+                Log("whkd restart: " + ex.Message);
             }
         }
 
@@ -739,15 +778,36 @@ namespace KomorebiTaskbarInfo
 
         void HttpWorker()
         {
-            try
+            // A previous instance may still hold the preferred port (killed
+            // mid-accept, or the socket handle outlived it in a child), so walk
+            // a few ports before giving up on the endpoint for this session.
+            for (int round = 1; round <= 3 && !_exit && _http == null; round++)
             {
-                _http = new TcpListener(IPAddress.Loopback, HttpPort);
-                _http.Start();
-                Log("http listening on 127.0.0.1:" + HttpPort);
+                for (int offset = 0; offset < 4 && _http == null; offset++)
+                {
+                    int port = HttpPort + offset;
+                    try
+                    {
+                        var listener = new TcpListener(IPAddress.Loopback, port);
+                        listener.Start();
+                        _http = listener;
+                        Log("http listening on 127.0.0.1:" + port);
+                    }
+                    catch (Exception ex)
+                    {
+                        if (round == 1) Log("http port " + port + ": " + ex.Message);
+                    }
+                }
+
+                if (_http == null)
+                {
+                    for (int i = 0; i < 10 && !_exit; i++) Thread.Sleep(1000);
+                }
             }
-            catch (Exception ex)
+
+            if (_http == null)
             {
-                Log("http start: " + ex.Message);
+                Log("http disabled for this session");
                 return;
             }
 
