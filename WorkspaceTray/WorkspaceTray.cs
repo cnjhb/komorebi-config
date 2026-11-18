@@ -691,7 +691,9 @@ namespace KomorebiTaskbarInfo
         internal static GraphicsPath RoundedRect(RectangleF r, float radius)
         {
             var path = new GraphicsPath();
-            float d = radius * 2f;
+            // Clamp the arc diameter: a radius larger than half the shorter side
+            // makes the arcs overlap and the outline degenerates into a square.
+            float d = Math.Min(radius * 2f, Math.Min(r.Width, r.Height));
             path.AddArc(r.X, r.Y, d, d, 180, 90);
             path.AddArc(r.Right - d, r.Y, d, d, 270, 90);
             path.AddArc(r.Right - d, r.Bottom - d, d, d, 0, 90);
