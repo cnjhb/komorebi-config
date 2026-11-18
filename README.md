@@ -83,6 +83,7 @@ Start-ScheduledTask komorebi
 Windows 11 任务栏没有第三方文字接口，所以用**置顶窗口**覆盖在任务栏左侧空白区：
 
 - 每块屏一个胶囊（`Shell_TrayWnd` / `Shell_SecondaryTrayWnd` 各一个）
+- **当前聚焦显示器指示**：聚焦屏的胶囊左侧是亮紫色圆点 + 紫色描边，其他屏是暗灰圆点 + 灰色描边，不用再靠鼠标确认键盘操作的是哪块屏
 - 通过 `komorebic subscribe-pipe` 订阅状态，切换工作区/窗口时即时刷新
 - 显示：工作区编号（聚焦 = 紫色加粗，有窗口 = 亮色，空 = 暗色）│ 当前窗口标题 │ 布局（BSP/Columns/Monocle/Max/Float；宽度随内容重算，先 resize 再渲染以避免重叠）
 - 外观：Dracula 深色胶囊（`#1E1F29` + 细边框），JetBrainsMono NF

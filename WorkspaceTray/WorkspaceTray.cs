@@ -465,7 +465,7 @@ namespace KomorebiTaskbarInfo
                     _lastTitle.TryGetValue(strip.DeviceName, out title);
                 }
 
-                strip.SetModel(names, wsi, title, layout, _light, occupied);
+                strip.SetModel(names, wsi, title, layout, _light, occupied, mi == focusedMonitor);
 
                 var line = new StringBuilder();
                 for (int i = 0; i < names.Count; i++)
@@ -886,6 +886,9 @@ namespace KomorebiTaskbarInfo
         // Dracula palette for the capsule
         static readonly Color Capsule = Color.FromArgb(255, 0x1E, 0x1F, 0x29);
         static readonly Color CapsuleEdge = Color.FromArgb(255, 0x33, 0x36, 0x4A);
+        static readonly Color FocusEdge = Color.FromArgb(255, 0x6C, 0x5C, 0x9E);
+        static readonly Color FocusDot = Color.FromArgb(255, 0xBD, 0x93, 0xF9);
+        static readonly Color FocusDotIdle = Color.FromArgb(255, 0x44, 0x47, 0x5A);
         static readonly Color TextOccupied = Color.FromArgb(255, 0xD6, 0xDB, 0xE8);
         static readonly Color TextEmpty = Color.FromArgb(255, 0x4A, 0x50, 0x64);
         static readonly Color TextActive = Color.FromArgb(255, 0xBD, 0x93, 0xF9);
@@ -908,6 +911,7 @@ namespace KomorebiTaskbarInfo
         string _title = "";
         string _layout = "";
         bool _light = true;
+        bool _monitorFocused;
         Rectangle _bounds;
         bool _rendered;
 
@@ -1047,7 +1051,8 @@ namespace KomorebiTaskbarInfo
             float pad = Math.Max(10f, height * 0.22f);
             float step = fontPx * 1.10f;
 
-            float content = pad + _names.Count * step + pad * 1.4f;
+            float dot = Math.Max(7f, height * 0.18f);
+            float content = pad + dot + pad * 0.55f + _names.Count * step + pad * 1.4f;
             if (!string.IsNullOrEmpty(_title))
                 content += Math.Min(360f, EstimateTextWidth(_title, fontPx));
             if (!string.IsNullOrEmpty(_layout))
@@ -1097,7 +1102,7 @@ namespace KomorebiTaskbarInfo
         }
 
         public void SetModel(List<string> names, int focused, string title, string layout, bool light,
-                             List<bool> occupied)
+                             List<bool> occupied, bool monitorFocused)
         {
             title = title ?? "";
             layout = layout ?? "";
@@ -1105,6 +1110,7 @@ namespace KomorebiTaskbarInfo
 
             bool changed = light != _light || focused != _focused ||
                            title != _title || layout != _layout ||
+                           monitorFocused != _monitorFocused ||
                            names.Count != _names.Count || occupied.Count != _occupied.Count;
             if (!changed)
             {
@@ -1128,6 +1134,7 @@ namespace KomorebiTaskbarInfo
             _layout = layout;
             _light = light;
             _occupied = occupied;
+            _monitorFocused = monitorFocused;
 
             RefreshBounds();
             Render();
@@ -1167,8 +1174,11 @@ namespace KomorebiTaskbarInfo
             using (var pill = InfoContext.RoundedRect(new RectangleF(0, 0, w, h), h / 2f))
                 g.FillPath(fill, pill);
 
-            using (var edge = new Pen(CapsuleEdge, 1f))
-            using (var outline = InfoContext.RoundedRect(new RectangleF(0.5f, 0.5f, w - 1f, h - 1f), h / 2f))
+            Color edgeColor = _monitorFocused ? FocusEdge : CapsuleEdge;
+            float edgeWidth = _monitorFocused ? 1.6f : 1f;
+            using (var edge = new Pen(edgeColor, edgeWidth))
+            using (var outline = InfoContext.RoundedRect(
+                new RectangleF(edgeWidth / 2f, edgeWidth / 2f, w - edgeWidth, h - edgeWidth), h / 2f))
                 g.DrawPath(edge, outline);
 
             float fontPx = Math.Max(10f, h * 0.36f);
@@ -1199,6 +1209,13 @@ namespace KomorebiTaskbarInfo
                 float pad = Math.Max(10f, h * 0.22f);
                 float step = fontPx * 1.10f;
                 float x = pad;
+
+                // Which monitor komorebi has focused: a filled purple dot on the
+                // focused monitor's taskbar, a muted one on the others.
+                float dot = Math.Max(7f, h * 0.18f);
+                using (var dotBrush = new SolidBrush(_monitorFocused ? FocusDot : FocusDotIdle))
+                    g.FillEllipse(dotBrush, x, (h - dot) / 2f, dot, dot);
+                x += dot + pad * 0.55f;
 
                 for (int i = 0; i < _names.Count; i++)
                 {
