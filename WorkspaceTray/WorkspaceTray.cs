@@ -1047,14 +1047,11 @@ namespace KomorebiTaskbarInfo
             float pad = Math.Max(10f, height * 0.22f);
             float step = fontPx * 1.10f;
 
-            // A fixed layout slot keeps the capsule width stable across
-            // BSP/Columns/Monocle/Max/Float changes.
-            float layoutSlot = EstimateTextWidth("Monocle", fontPx) + pad;
-
             float content = pad + _names.Count * step + pad * 1.4f;
             if (!string.IsNullOrEmpty(_title))
                 content += Math.Min(360f, EstimateTextWidth(_title, fontPx));
-            content += layoutSlot;
+            if (!string.IsNullOrEmpty(_layout))
+                content += EstimateTextWidth(_layout, fontPx) + pad;
 
             int width = Math.Min(maxWidth, Math.Max(140, (int)Math.Ceiling(content + pad)));
 
@@ -1222,14 +1219,16 @@ namespace KomorebiTaskbarInfo
                     g.DrawLine(pen, x, h * 0.3f, x, h * 0.7f);
                 x += pad * 0.8f;
 
-                float layoutSlot = EstimateTextWidth("Monocle", fontPx) + pad;
+                float layoutWidth = 0f;
                 if (!string.IsNullOrEmpty(_layout))
                 {
+                    layoutWidth = g.MeasureString(_layout, font).Width;
                     g.DrawString(_layout, font, dimBrush,
-                        new RectangleF(w - pad - layoutSlot, 0, layoutSlot, h), sfRight);
+                        new RectangleF(w - pad - layoutWidth - 2, 0, layoutWidth + 2, h), sfRight);
+                    layoutWidth += pad;
                 }
 
-                float titleRight = w - pad - layoutSlot;
+                float titleRight = w - pad - layoutWidth;
                 float titleWidth = titleRight - x;
                 if (titleWidth > 30 && !string.IsNullOrEmpty(_title))
                 {
