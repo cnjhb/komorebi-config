@@ -26,7 +26,7 @@ win + m                 : komorebic toggle-maximize
 win + shift + c         : komorebic close
 win + ctrl + space      : komorebic toggle-float
 win + ctrl + return     : komorebic promote
-win + o                 : komorebic cycle-move-to-monitor next
+win + o                 : & "$HOME\AppData\Local\Programs\move-to-monitor.ps1" next
 win + t                 : komorebic toggle-float
 
 # ===== workspaces (awesome tags 1-9) =====

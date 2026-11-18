@@ -15,7 +15,8 @@ komorebi-config/
 │   ├── komorebi-start.ps1     # 登录启动：等待 komorebi → whkd + 任务栏信息条
 │   ├── komorebi-elevated.ps1  # 计划任务用它提权启动 komorebi（带重试）
 │   ├── install-komorebi-task.ps1  # 注册「komorebi」登录计划任务（需要 UAC）
-│   └── launch-focused.ps1     # 在当前聚焦的屏幕/工作区启动终端/Firefox
+│   ├── launch-focused.ps1     # 在当前聚焦的屏幕/工作区启动终端/Firefox
+│   ├── move-to-monitor.ps1    # win+o：把窗口移到下一块屏（绕过 monocle 下的 komorebi bug）
 ├── WorkspaceTray/
 │   ├── WorkspaceTray.cs       # 任务栏信息条（C# / WinForms）
 │   ├── app.manifest           # PerMonitorV2 DPI 声明
@@ -67,6 +68,7 @@ Start-ScheduledTask komorebi
 | 切换窗口 | `win + j` / `win + k` |
 | 移动窗口 | `win + shift + j` / `win + shift + k` |
 | 切换显示器 | `win + ctrl + j` / `win + ctrl + k` |
+| 移动窗口到下一块屏 | `win + o` |
 | 切换工作区 1-9 | `win + 1..9` |
 | 移动窗口到工作区 | `win + shift + 1..9` |
 | 浮动 / monocle / 最大化 | `win + t` / `win + f` / `win + m` |
@@ -139,6 +141,7 @@ Error: failed call to AllowSetForegroundWindow after 5 retries
 |---|---|
 | `%USERPROFILE%\komorebi-start.log` | 启动流程 |
 | `%USERPROFILE%\launch-focused.log` | 应用启动/搬移结果 |
+| `%USERPROFILE%\move-to-monitor.log` | `win+o` 移动窗口的结果 |
 | `%USERPROFILE%\taskbar-info.log` | 任务栏信息条连接/渲染 |
 | `%USERPROFILE%\komorebi-stderr.log` | komorebi 的 panic 输出（正常为空） |
 
@@ -146,6 +149,7 @@ Error: failed call to AllowSetForegroundWindow after 5 retries
 
 - komorebi 需要提权（见上），`komorebi.exe` 未签名所以没有 UIAccess；提权后反而能管理提权窗口
 - komorebi 启动前就已存在的窗口不会被自动接管，用 `komorebic manage` 手动接管当前聚焦窗口
+- komorebi v0.1.41 里 **monocle 状态下所有移动命令都会失败**（`ERROR: there is no container`，原因是窗口挂在 `monocle_container` 而不是 `containers`），所以 `win + o` 用 `move-to-monitor.ps1` 绕过：先关 monocle、移动、再在新屏打开
 - 任务栏胶囊是覆盖窗口，不参与任务栏布局；任务栏左对齐或关闭 Widgets 时位置会调整（脚本会读 `TaskbarDa` 自动左移）
 - 只有被 komorebi 管理的窗口才会显示标题；聚焦未托管窗口时保留上一个标题
 - 工作区数字不可点击（点击穿透），切换仍用 `win + 1..9`
