@@ -12,7 +12,9 @@ komorebi-config/
 ├── whkd/
 │   └── whkdrc                 # 快捷键（awesomewm 风格）
 ├── scripts/
-│   ├── komorebi-start.ps1     # 登录启动：komorebi + whkd + 任务栏信息条
+│   ├── komorebi-start.ps1     # 登录启动：等待 komorebi → whkd + 任务栏信息条
+│   ├── komorebi-elevated.ps1  # 计划任务用它提权启动 komorebi（带重试）
+│   ├── install-komorebi-task.ps1  # 注册「komorebi」登录计划任务（需要 UAC）
 │   └── launch-focused.ps1     # 在当前聚焦的屏幕/工作区启动终端/Firefox
 ├── WorkspaceTray/
 │   ├── WorkspaceTray.cs       # 任务栏信息条（C# / WinForms）
@@ -44,12 +46,14 @@ cd komorebi-config
 1. 把配置复制到 `%USERPROFILE%`（`komorebi.json`、`applications.json`）和 `%USERPROFILE%\.config\whkdrc`
 2. 把脚本复制到 `%LOCALAPPDATA%\Programs\`
 3. 把 `WorkspaceTray` 源码复制到 `%LOCALAPPDATA%\Programs\WorkspaceTray\` 并编译
-4. 重建启动项 `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\komorebi.lnk`
+4. 重建启动项 `%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup\komorebi.lnk`（启动 whkd + 信息条）
+5. 注册登录计划任务 `komorebi`，以最高权限启动 `komorebi.exe`（会弹一次 UAC）
 
 然后重启当前会话：
 
 ```powershell
-komorebic stop --whkd --bar
+komorebic stop --whkd
+Start-ScheduledTask komorebi
 # 双击 Startup 里的 komorebi.lnk，或注销/重新登录
 ```
 
@@ -108,12 +112,25 @@ Windows 11 任务栏没有第三方文字接口，所以用**置顶窗口**覆�
 
 **注意**：脚本必须用「重定向到文件 + UTF-8 读取」的方式解析 `komorebic state`。whkd 调起的 pwsh 使用系统代码页（GBK），直接管道读取会把中文窗口标题解码坏，导致 JSON 解析失败、快捷键"没反应"。
 
-### 启动脚本（komorebi-start.ps1）
+### 启动脚本（komorebi-start.ps1 / komorebi-elevated.ps1）
 
-- 直接启动 `komorebi.exe`，把 stderr 重定向到 `komorebi-stderr.log`（komorebi 是 `panic=abort` 构建，崩溃时日志里没有信息，stderr 才有）
-- 轮询 `komorebic state` 等待 socket 就绪
-- 按需启动 whkd 和任务栏信息条
-- 由 Startup 快捷方式（资源管理器）启动，避免进程被其他进程树清理
+komorebi 现在**必须提权运行**：Windows 11 26H2（build 26300）起，中完整性进程调用 `AllowSetForegroundWindow` 会被拒绝，`komorebi.exe` 启动后直接退出：
+
+```
+Error: failed call to AllowSetForegroundWindow after 5 retries
+```
+
+所以启动拆成两部分：
+
+- **计划任务 `komorebi`**（最高权限，登录后延迟 10 秒）→ `komorebi-elevated.ps1`
+  - 等 explorer 就绪，把 `ForegroundLockTimeout` 置 0
+  - 隐藏窗口启动 `komorebi.exe`，stderr 重定向到 `komorebi-stderr.log`（komorebi 是 `panic=abort` 构建，崩溃时日志里没有信息，stderr 才有）
+  - 轮询 `komorebic state` 等待 socket 就绪，失败自动重试 5 次
+- **Startup 快捷方式**（普通权限，由资源管理器启动）→ `komorebi-start.ps1`
+  - 先等 komorebi 起来，再启动 whkd 和任务栏信息条
+  - 用快捷方式而不是别的进程树，避免它们被连带清理
+
+注意：隐藏窗口启动很重要。直接 `Start-Process -Verb RunAs` 启动会留下一个标题为 `C:\Program Files\komorebi\bin\komorebi.exe` 的控制台窗口，关掉它就等于杀掉 komorebi。
 
 ## 日志
 
@@ -126,6 +143,8 @@ Windows 11 任务栏没有第三方文字接口，所以用**置顶窗口**覆�
 
 ## 已知限制
 
+- komorebi 需要提权（见上），`komorebi.exe` 未签名所以没有 UIAccess；提权后反而能管理提权窗口
+- komorebi 启动前就已存在的窗口不会被自动接管，用 `komorebic manage` 手动接管当前聚焦窗口
 - 任务栏胶囊是覆盖窗口，不参与任务栏布局；任务栏左对齐或关闭 Widgets 时位置会调整（脚本会读 `TaskbarDa` 自动左移）
 - 只有被 komorebi 管理的窗口才会显示标题；聚焦未托管窗口时保留上一个标题
 - 工作区数字不可点击（点击穿透），切换仍用 `win + 1..9`

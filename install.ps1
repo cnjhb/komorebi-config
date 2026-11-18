@@ -9,8 +9,9 @@
       scripts/*.ps1               -> %LOCALAPPDATA%\Programs\
       WorkspaceTray/*             -> %LOCALAPPDATA%\Programs\WorkspaceTray\  (+ build)
 
-    Also (re)creates the Startup shortcut that launches komorebi, whkd and the
-    taskbar workspace strip at logon.
+    Also (re)creates the Startup shortcut that launches whkd and the taskbar
+    workspace strip at logon, and registers the "komorebi" scheduled task that
+    starts komorebi elevated (UAC prompt).
 #>
 
 $ErrorActionPreference = 'Stop'
@@ -38,6 +39,8 @@ Copy-Item (Join-Path $root 'komorebi\komorebi.json')     (Join-Path $userProfile
 Copy-Item (Join-Path $root 'komorebi\applications.json') (Join-Path $userProfile 'applications.json') -Force
 Copy-Item (Join-Path $root 'whkd\whkdrc')                (Join-Path $configDir 'whkdrc') -Force
 Copy-Item (Join-Path $root 'scripts\komorebi-start.ps1') $programs -Force
+Copy-Item (Join-Path $root 'scripts\komorebi-elevated.ps1') $programs -Force
+Copy-Item (Join-Path $root 'scripts\install-komorebi-task.ps1') $programs -Force
 Copy-Item (Join-Path $root 'scripts\launch-focused.ps1') $programs -Force
 Copy-Item (Join-Path $root 'WorkspaceTray\WorkspaceTray.cs') $trayDir -Force
 Copy-Item (Join-Path $root 'WorkspaceTray\app.manifest')     $trayDir -Force
@@ -60,11 +63,15 @@ $shortcut.TargetPath       = Join-Path $env:SystemRoot 'System32\WindowsPowerShe
 $shortcut.Arguments        = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$programs\komorebi-start.ps1`""
 $shortcut.WorkingDirectory = $userProfile
 $shortcut.IconLocation     = "$komorebic,0"
-$shortcut.Description      = 'Start komorebi, whkd and the taskbar workspace strip'
+$shortcut.Description      = 'Start whkd and the taskbar workspace strip (komorebi itself is started by the komorebi scheduled task)'
 $shortcut.Save()
 Write-Host "startup shortcut: $lnkPath"
 
+Write-Host 'registering the komorebi scheduled task (highest privileges, UAC prompt)'
+& (Join-Path $root 'scripts\install-komorebi-task.ps1')
+
 Write-Host ''
 Write-Host 'Installed. To apply now:'
-Write-Host '  1. komorebic stop --whkd --bar'
-Write-Host '  2. double-click the Startup shortcut (or sign out and back in)'
+Write-Host '  1. komorebic stop --whkd'
+Write-Host '  2. Start-ScheduledTask komorebi, then double-click the Startup shortcut'
+Write-Host '     (or simply sign out and back in)'

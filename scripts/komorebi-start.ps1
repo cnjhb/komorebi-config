@@ -10,21 +10,18 @@ Start-Sleep -Seconds 4
 $bin = Join-Path $env:ProgramFiles 'komorebi\bin'
 $env:PATH = "$bin;$env:PATH"
 
-if (-not (Get-Process komorebi -ErrorAction SilentlyContinue)) {
-    Log 'starting komorebi'
-    Start-Process -FilePath (Join-Path $bin 'komorebi.exe') -WindowStyle Hidden `
-        -RedirectStandardError (Join-Path $env:USERPROFILE 'komorebi-stderr.log') `
-        -RedirectStandardOutput (Join-Path $env:USERPROFILE 'komorebi-stdout.log')
-
-    $up = $false
-    for ($i = 0; $i -lt 40; $i++) {
-        Start-Sleep -Milliseconds 500
-        & (Join-Path $bin 'komorebic.exe') state *> $null
-        if ($LASTEXITCODE -eq 0) { $up = $true; break }
-    }
-    if ($up) { Log 'komorebi is up' } else { Log 'WARNING: komorebi did not come up' }
+# komorebi itself is started elevated by the "komorebi" scheduled task. A
+# medium-integrity start fails on Windows 11 26H2 (AllowSetForegroundWindow).
+$up = $false
+for ($i = 0; $i -lt 60; $i++) {
+    & (Join-Path $bin 'komorebic.exe') state *> $null
+    if ($LASTEXITCODE -eq 0) { $up = $true; break }
+    Start-Sleep -Milliseconds 500
+}
+if ($up) {
+    Log 'komorebi is up'
 } else {
-    Log 'komorebi already running'
+    Log 'WARNING: komorebi is not running (did the elevated scheduled task start?)'
 }
 
 $whkd = Join-Path $env:ProgramFiles 'whkd\bin\whkd.exe'
