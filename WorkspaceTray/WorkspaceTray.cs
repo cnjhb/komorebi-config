@@ -198,11 +198,9 @@ namespace KomorebiTaskbarInfo
 
         void HookSystemEvents()
         {
-            // After a sign-in or a Modern Standby resume the taskbar is not
-            // painted yet, so the background sampled from its pixels is the
-            // wallpaper (or black) and the strip shows as a coloured square
-            // until the next 2s sample. Re-sample as soon as the desktop comes
-            // back instead of waiting for the timer.
+            // After a sign-in or a Modern Standby resume the taskbar is
+            // re-created and the strips lose their layered surface, so push a
+            // fresh frame as soon as the desktop comes back.
             try
             {
                 SystemEvents.PowerModeChanged += delegate { ForceRefresh("power"); };
@@ -329,14 +327,14 @@ namespace KomorebiTaskbarInfo
 
                 if (_forceRefresh != null)
                 {
-                    Log("resample after " + _forceRefresh);
+                    Log("repaint after " + _forceRefresh);
                     _forceRefresh = null;
                     // The taskbar window may have been recreated by the shell
-                    // restore, so re-attach first, then force a fresh sample.
+                    // restore, so re-attach first, then force a fresh frame.
                     RebuildStrips();
                     foreach (var s in _strips.ToArray())
                     {
-                        s.InvalidateBackgroundSample();
+                        s.InvalidateRender();
                         if (s.Visible) s.RefreshBounds();
                     }
                 }
@@ -1062,12 +1060,6 @@ namespace KomorebiTaskbarInfo
         static readonly Color TextDim = Color.FromArgb(255, 0x62, 0x72, 0xA4);
         static readonly Color Separator = Color.FromArgb(255, 0x44, 0x47, 0x5A);
 
-        Color _bgTop;
-        Color _bgMid;
-        Color _bgBottom;
-        DateTime _lastSample = DateTime.MinValue;
-        DateTime _lastJumpLog = DateTime.MinValue;
-
         readonly IntPtr _taskbar;
         readonly bool _primary;
         public readonly string DeviceName;
@@ -1090,12 +1082,18 @@ namespace KomorebiTaskbarInfo
         public bool IsPrimary { get { return _primary; } }
         public string LastLayoutLog = "";
 
-        // Drop the cached taskbar colours so the next RefreshBounds samples
-        // again (used after sign-in, resume, theme and display changes).
-        public void InvalidateBackgroundSample()
+        // Force a repaint (used after sign-in, resume, theme and display changes).
+        public void InvalidateRender()
         {
-            _lastSample = DateTime.MinValue;
             _rendered = false;
+        }
+
+        // The first Render() happens in the constructor, before the window is
+        // shown; push the frame again once it is really on screen.
+        protected override void OnShown(EventArgs e)
+        {
+            base.OnShown(e);
+            Render();
         }
 
         public Strip(IntPtr taskbar, string device, bool primary)
@@ -1109,89 +1107,48 @@ namespace KomorebiTaskbarInfo
             StartPosition = FormStartPosition.Manual;
             AutoScaleMode = AutoScaleMode.None;
             TopMost = true;
-            var initialBg = IsLightTheme() ? Color.FromArgb(255, 249, 249, 249) : Color.FromArgb(255, 43, 43, 43);
-            _bgTop = _bgMid = _bgBottom = initialBg;
-            BackColor = initialBg;
             SetStyle(ControlStyles.UserPaint | ControlStyles.OptimizedDoubleBuffer | ControlStyles.AllPaintingInWmPaint, true);
             _bounds = new Rectangle(0, 0, 1, 1);
             RefreshBounds();
         }
 
-        static bool IsLightTheme()
+        // Per-pixel alpha: the window is a layered surface, so the area around
+        // the pill is genuinely transparent and shows the taskbar underneath
+        // (including its acrylic/hover states). No background sampling needed.
+        void ApplyLayered(Bitmap bmp)
         {
+            IntPtr screenDc = Native.GetDC(IntPtr.Zero);
+            IntPtr memDc = Native.CreateCompatibleDC(screenDc);
+            IntPtr hBmp = bmp.GetHbitmap(Color.FromArgb(0));
+            IntPtr old = Native.SelectObject(memDc, hBmp);
             try
             {
-                using (var key = Registry.CurrentUser.OpenSubKey(
-                    @"Software\Microsoft\Windows\CurrentVersion\Themes\Personalize"))
+                var size = new Native.SIZE { CX = bmp.Width, CY = bmp.Height };
+                var src = new Native.POINT { X = 0, Y = 0 };
+                var dst = new Native.POINT { X = _bounds.X, Y = _bounds.Y };
+                var blend = new Native.BLENDFUNCTION
                 {
-                    if (key != null)
-                    {
-                        var v = key.GetValue("SystemUsesLightTheme");
-                        if (v is int) return (int)v != 0;
-                    }
+                    BlendOp = Native.AC_SRC_OVER,
+                    BlendFlags = 0,
+                    SourceConstantAlpha = 255,
+                    AlphaFormat = Native.AC_SRC_ALPHA
+                };
+                bool ok = Native.UpdateLayeredWindow(Handle, screenDc, ref dst, ref size,
+                    memDc, ref src, 0, ref blend, Native.ULW_ALPHA);
+                if (!ok)
+                {
+                    int err = Marshal.GetLastWin32Error();
+                    InfoContext.Log("ULW failed on " + DeviceName + " size=" + size.CX + "x" + size.CY +
+                        " dst=" + dst.X + "," + dst.Y + " err=" + err);
                 }
             }
-            catch { }
-            return true;
-        }
-
-        static int ColorDiff(Color a, Color b)
-        {
-            return Math.Max(Math.Abs(a.R - b.R), Math.Max(Math.Abs(a.G - b.G), Math.Abs(a.B - b.B)));
-        }
-
-        // Samples the taskbar background (top/middle/bottom) in the empty gap
-        // to the right of the strip. The window itself stays rectangular and
-        // paints this gradient, so the anti-aliased capsule corners blend into
-        // the taskbar instead of being clipped by a hard 1-bit window region.
-        void SampleBackground(RECT taskbar, int startLeft)
-        {
-            if ((DateTime.Now - _lastSample).TotalSeconds < 2) return;
-            _lastSample = DateTime.Now;
-
-            int x1 = _bounds.Right + 8;
-            int x2 = startLeft - 8;
-            if (x2 - x1 < 16) return;
-
-            int x = (x1 + x2) / 2;
-            int top = taskbar.Top + 6;
-            int bottom = taskbar.Bottom - 6;
-            int mid = (top + bottom) / 2;
-
-            try
+            finally
             {
-                using (var bmp = new Bitmap(1, 3))
-                using (var g = Graphics.FromImage(bmp))
-                {
-                    g.CopyFromScreen(x, top, 0, 0, new Size(1, 1));
-                    g.CopyFromScreen(x, mid, 0, 1, new Size(1, 1));
-                    g.CopyFromScreen(x, bottom, 0, 2, new Size(1, 1));
-
-                    var c1 = bmp.GetPixel(0, 0);
-                    var c2 = bmp.GetPixel(0, 1);
-                    var c3 = bmp.GetPixel(0, 2);
-
-                    if (ColorDiff(c1, _bgTop) > 3 || ColorDiff(c2, _bgMid) > 3 || ColorDiff(c3, _bgBottom) > 3)
-                    {
-                        int jump = Math.Max(ColorDiff(c1, _bgTop),
-                                   Math.Max(ColorDiff(c2, _bgMid), ColorDiff(c3, _bgBottom)));
-                        if (jump > 40 && (DateTime.Now - _lastJumpLog).TotalSeconds > 5)
-                        {
-                            _lastJumpLog = DateTime.Now;
-                            InfoContext.Log("bg jump on " + DeviceName +
-                                " rgb(" + _bgMid.R + "," + _bgMid.G + "," + _bgMid.B + ") -> rgb(" +
-                                c2.R + "," + c2.G + "," + c2.B + ")");
-                        }
-
-                        _bgTop = c1;
-                        _bgMid = c2;
-                        _bgBottom = c3;
-                        BackColor = c2;
-                        Render();
-                    }
-                }
+                Native.SelectObject(memDc, old);
+                Native.DeleteObject(hBmp);
+                Native.DeleteDC(memDc);
+                Native.ReleaseDC(IntPtr.Zero, screenDc);
             }
-            catch { }
         }
 
         protected override CreateParams CreateParams
@@ -1199,7 +1156,7 @@ namespace KomorebiTaskbarInfo
             get
             {
                 var cp = base.CreateParams;
-                cp.ExStyle |= Native.WS_EX_NOACTIVATE | Native.WS_EX_TOOLWINDOW;
+                cp.ExStyle |= Native.WS_EX_LAYERED | Native.WS_EX_NOACTIVATE | Native.WS_EX_TOOLWINDOW;
                 return cp;
             }
         }
@@ -1221,7 +1178,7 @@ namespace KomorebiTaskbarInfo
             if (m.Msg == WM_THEMECHANGED || m.Msg == WM_DWMCOMPOSITIONCHANGED ||
                 m.Msg == WM_DWMCOLORIZATIONCOLORCHANGED)
             {
-                InvalidateBackgroundSample();
+                InvalidateRender();
                 return;
             }
 
@@ -1270,6 +1227,7 @@ namespace KomorebiTaskbarInfo
             {
                 Native.SetWindowPos(Handle, Native.HWND_TOPMOST, desired.X, desired.Y, desired.Width, desired.Height,
                     Native.SWP_NOACTIVATE | Native.SWP_SHOWWINDOW);
+                Render();
             }
             else if (_refreshCount % 5 == 0)
             {
@@ -1277,13 +1235,6 @@ namespace KomorebiTaskbarInfo
                 // always-on-top windows, without a SetWindowPos on every tick.
                 Native.SetWindowPos(Handle, Native.HWND_TOPMOST, 0, 0, 0, 0,
                     Native.SWP_NOMOVE | Native.SWP_NOSIZE | Native.SWP_NOACTIVATE | Native.SWP_SHOWWINDOW);
-            }
-
-            SampleBackground(tr, startLeft);
-
-            if (changed || !_rendered)
-            {
-                Render();
             }
         }
 
@@ -1351,61 +1302,49 @@ namespace KomorebiTaskbarInfo
             Render();
         }
 
+        // Layered windows do not receive WM_PAINT; Render() pushes the whole
+        // frame with UpdateLayeredWindow instead.
         protected override void OnPaint(PaintEventArgs e)
         {
-            try
-            {
-                int w = _bounds.Width;
-                int h = _bounds.Height;
-                if (w <= 1 || h <= 1)
-                {
-                    e.Graphics.Clear(_bgMid);
-                    _paintOk = false;
-                    return;
-                }
-                RenderInto(e.Graphics, w, h);
-                _paintOk = true;
-            }
-            catch (Exception ex)
-            {
-                // WinForms swallows paint exceptions and paints a red X that
-                // stays on screen until something forces a repaint. Log the
-                // real error and fall back to a flat capsule colour instead.
-                _paintOk = false;
-                _paintFailures++;
-                if (_paintFailures <= 5 || _paintFailures % 60 == 0)
-                    InfoContext.Log("paint #" + _paintFailures + ": " + ex);
-                try { e.Graphics.Clear(_bgMid); } catch { }
-            }
         }
 
         void Render()
         {
-            if (_bounds.Width <= 0 || _bounds.Height <= 0) return;
+            int w = _bounds.Width;
+            int h = _bounds.Height;
+            if (w <= 1 || h <= 1) return;
+
             _paintOk = false;
-            Invalidate();
-            Update();
-            // A failed paint is retried by the next tick instead of leaving the
-            // red X (or a stale frame) on the taskbar until the model changes.
+            try
+            {
+                using (var bmp = new Bitmap(w, h, PixelFormat.Format32bppArgb))
+                {
+                    using (var g = Graphics.FromImage(bmp))
+                    {
+                        g.Clear(Color.Transparent);
+                        RenderInto(g, w, h);
+                    }
+                    ApplyLayered(bmp);
+                }
+                _paintOk = true;
+            }
+            catch (Exception ex)
+            {
+                _paintFailures++;
+                if (_paintFailures <= 5 || _paintFailures % 60 == 0)
+                    InfoContext.Log("paint #" + _paintFailures + ": " + ex);
+            }
+
+            // A failed paint is retried by the next tick instead of leaving a
+            // stale frame on the taskbar until the model changes.
             _rendered = _paintOk;
         }
 
         void RenderInto(Graphics g, int w, int h)
         {
             g.SmoothingMode = SmoothingMode.AntiAlias;
-            g.TextRenderingHint = TextRenderingHint.ClearTypeGridFit;
-
-            // The window is rectangular; paint a taskbar-coloured gradient so
-            // the anti-aliased capsule edge blends into the taskbar instead of
-            // being clipped by a jagged 1-bit window region.
-            using (var bg = new LinearGradientBrush(new Rectangle(0, 0, w, h), _bgTop, _bgBottom, 90f))
-            {
-                var blend = new ColorBlend(3);
-                blend.Colors = new[] { _bgTop, _bgMid, _bgBottom };
-                blend.Positions = new[] { 0f, 0.5f, 1f };
-                bg.InterpolationColors = blend;
-                g.FillRectangle(bg, 0, 0, w, h);
-            }
+            // ClearType cannot be used on a transparent surface.
+            g.TextRenderingHint = TextRenderingHint.AntiAliasGridFit;
 
             using (var fill = new SolidBrush(Capsule))
             using (var pill = InfoContext.RoundedRect(new RectangleF(0, 0, w, h), h / 2f))
@@ -1568,6 +1507,33 @@ namespace KomorebiTaskbarInfo
 
         [DllImport("user32.dll")]
         public static extern bool SetProcessDpiAwarenessContext(IntPtr ctx);
+
+        // --- per-pixel alpha (UpdateLayeredWindow) ---
+
+        public const int WS_EX_LAYERED = 0x00080000;
+        public const byte AC_SRC_OVER = 0x00;
+        public const byte AC_SRC_ALPHA = 0x01;
+        public const uint ULW_ALPHA = 0x00000002;
+
+        [StructLayout(LayoutKind.Sequential, Pack = 1)]
+        public struct BLENDFUNCTION
+        {
+            public byte BlendOp;
+            public byte BlendFlags;
+            public byte SourceConstantAlpha;
+            public byte AlphaFormat;
+        }
+
+        [DllImport("user32.dll")] public static extern IntPtr GetDC(IntPtr h);
+        [DllImport("user32.dll")] public static extern int ReleaseDC(IntPtr h, IntPtr dc);
+        [DllImport("gdi32.dll")] public static extern IntPtr CreateCompatibleDC(IntPtr dc);
+        [DllImport("gdi32.dll")] public static extern bool DeleteDC(IntPtr dc);
+        [DllImport("gdi32.dll")] public static extern IntPtr SelectObject(IntPtr dc, IntPtr obj);
+        [DllImport("gdi32.dll")] public static extern bool DeleteObject(IntPtr obj);
+
+        [DllImport("user32.dll")]
+        public static extern bool UpdateLayeredWindow(IntPtr hwnd, IntPtr dstDc, ref POINT dstPos,
+            ref SIZE size, IntPtr srcDc, ref POINT srcPos, int colorKey, ref BLENDFUNCTION blend, uint flags);
 
         public static string ClassNameOf(IntPtr h)
         {
