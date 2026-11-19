@@ -91,7 +91,7 @@ Windows 11 任务栏没有第三方文字接口，所以用**置顶窗口**覆�
 - 外观：Dracula 深色胶囊（`#1E1F29` + 细边框），JetBrainsMono NF
 - `WM_NCHITTEST -> HTTRANSPARENT`，点击穿透，不影响任务栏
 - 全屏应用时自动隐藏
-- **托管 whkd**：由托盘启动并监视（stdout/stderr 重定向，不再依赖隐藏控制台），退出时把**退出码**写进日志（`whkd exited with code 0x...`）再自动拉起，`whkd stderr:` 行会记录 panic 输出；托盘菜单里可以关掉
+- **托管 whkd**：由托盘启动并监视，stdout/stderr **重定向到文件**（不用管道——管道读端消失会让 whkd 的 `println!` panic），退出时记录**退出码**（`whkd exited with code 0x...`）和 stderr 内容后自动拉起；托盘重启时会替换掉遗留的 whkd（旧管道已断）。托盘菜单里可以关掉
 - **任务栏只显示当前工作区的窗口（实验性，默认关闭）**：通过 `ITaskbarList::DeleteTab/AddTab` 把其他工作区的窗口从任务栏移除。实测在这个 Windows build 上会偶发导致 explorer 崩溃，所以默认不启用，可在托盘菜单里手动打开测试。
 
 同时在 `http://127.0.0.1:17321/` 提供一行纯文本（聚焦屏的工作区、布局、窗口标题），方便 Windhawk 等外部工具读取，例如：
@@ -148,6 +148,8 @@ Error: failed call to AllowSetForegroundWindow after 5 retries
 | `%USERPROFILE%\launch-focused.log` | 应用启动/搬移结果 |
 | `%USERPROFILE%\move-to-monitor.log` | `win+o` 移动窗口的结果 |
 | `%USERPROFILE%\taskbar-info.log` | 任务栏信息条连接/渲染，以及 whkd 的启动、退出码、stderr |
+| `%USERPROFILE%\whkd-stdout.log` | whkd 执行过的快捷键命令（每次启动时清空） |
+| `%USERPROFILE%\whkd-stderr.log` | whkd 的错误输出 / panic（每次启动时清空） |
 | `%USERPROFILE%\komorebi-stderr.log` | komorebi 的 panic 输出（正常为空） |
 
 ## 已知限制

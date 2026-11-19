@@ -79,6 +79,7 @@ namespace KomorebiTaskbarInfo
 
         static readonly string LogPath =
             System.IO.Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "taskbar-info.log");
+        static readonly object _logLock = new object();
 
         readonly List<Strip> _strips = new List<Strip>();
         readonly NotifyIcon _tray;
@@ -227,9 +228,14 @@ namespace KomorebiTaskbarInfo
         {
             try
             {
-                System.IO.File.AppendAllText(LogPath,
-                    DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") + "  " + message + Environment.NewLine,
-                    Encoding.UTF8);
+                // Several threads log (tick, pipe worker, process events); a
+                // plain AppendAllText drops lines when they collide.
+                lock (_logLock)
+                {
+                    System.IO.File.AppendAllText(LogPath,
+                        DateTime.Now.ToString("yyyy-MM-dd HH:mm:ss.fff") + "  " + message + Environment.NewLine,
+                        Encoding.UTF8);
+                }
             }
             catch { }
         }
@@ -379,45 +385,75 @@ namespace KomorebiTaskbarInfo
                     int code = 0;
                     try { code = _whkdProc.ExitCode; } catch { }
                     Log("whkd exited with code 0x" + code.ToString("X8"));
+                    LogWhkdStderr();
                     try { _whkdProc.Dispose(); } catch { }
                     _whkdProc = null;
                 }
 
-                // Started by something else (e.g. an older tray): monitor, but
-                // the exit code is not observable in that case.
-                if (Process.GetProcessesByName("whkd").Length > 0) return;
-                if ((DateTime.Now - _lastWhkdStart).TotalSeconds < 10) return;
+                // A whkd left over from a previous tray keeps a stdout pipe
+                // whose reader is gone; its next println! would panic, which is
+                // exactly how it died at 09:41. Replace it instead of adopting.
+                var existing = Process.GetProcessesByName("whkd");
+                if (existing.Length > 0)
+                {
+                    if ((DateTime.Now - _lastWhkdStart).TotalSeconds < 10)
+                    {
+                        foreach (var p in existing) p.Dispose();
+                        return;
+                    }
+                    foreach (var p in existing)
+                    {
+                        int oldPid = 0;
+                        try { oldPid = p.Id; p.Kill(); } catch { }
+                        try { p.Dispose(); } catch { }
+                        Log("replacing orphaned whkd (pid " + oldPid + ")");
+                    }
+                    _lastWhkdStart = DateTime.Now;
+                }
 
                 string whkd = System.IO.Path.Combine(
                     Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
                     "whkd", "bin", "whkd.exe");
                 if (!System.IO.File.Exists(whkd)) return;
 
-                var psi = new ProcessStartInfo(whkd);
+                // Redirect to files through cmd instead of pipes: whkd prints
+                // every executed binding to stdout, and a pipe whose reader
+                // (the tray) goes away makes the next println! panic. cmd also
+                // propagates whkd's exit code, so it stays observable.
+                string userProfile = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+                string outLog = System.IO.Path.Combine(userProfile, "whkd-stdout.log");
+                string errLog = System.IO.Path.Combine(userProfile, "whkd-stderr.log");
+                try { System.IO.File.WriteAllText(outLog, ""); System.IO.File.WriteAllText(errLog, ""); } catch { }
+
+                var psi = new ProcessStartInfo("cmd.exe");
+                psi.Arguments = "/c \"\"" + whkd + "\" >> \"" + outLog + "\" 2>> \"" + errLog + "\"\"";
                 psi.UseShellExecute = false;
                 psi.CreateNoWindow = true;
-                psi.RedirectStandardOutput = true;
-                psi.RedirectStandardError = true;
 
-                var proc = new Process();
-                proc.StartInfo = psi;
-                proc.OutputDataReceived += delegate { };
-                proc.ErrorDataReceived += delegate(object sender, DataReceivedEventArgs e)
-                {
-                    if (!string.IsNullOrEmpty(e.Data)) Log("whkd stderr: " + e.Data);
-                };
-                proc.Start();
-                proc.BeginOutputReadLine();
-                proc.BeginErrorReadLine();
-
+                var proc = Process.Start(psi);
                 _whkdProc = proc;
                 _lastWhkdStart = DateTime.Now;
-                Log("whkd started by tray (pid " + proc.Id + ")");
+                Log("whkd started by tray (cmd pid " + proc.Id + ")");
             }
             catch (Exception ex)
             {
                 Log("whkd restart: " + ex.Message);
             }
+        }
+
+        void LogWhkdStderr()
+        {
+            try
+            {
+                string errLog = System.IO.Path.Combine(
+                    Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), "whkd-stderr.log");
+                if (!System.IO.File.Exists(errLog)) return;
+                string text = System.IO.File.ReadAllText(errLog).Trim();
+                if (text.Length == 0) return;
+                if (text.Length > 4000) text = text.Substring(text.Length - 4000);
+                Log("whkd stderr: " + text.Replace("\r", ""));
+            }
+            catch { }
         }
 
         bool IsFullscreenForeground()
@@ -1036,6 +1072,15 @@ namespace KomorebiTaskbarInfo
             }
             try { if (_http != null) _http.Stop(); } catch { }
             try { _timer.Stop(); } catch { }
+            // Do not leave whkd behind with a stdout pipe that no longer has a
+            // reader: its next println! would panic it. The next tray starts a
+            // fresh instance. whkd is a grandchild (cmd wraps it), so kill by
+            // name rather than through _whkdProc.
+            try
+            {
+                foreach (var p in Process.GetProcessesByName("whkd")) { try { p.Kill(); } catch { } }
+            }
+            catch { }
             try { _tray.Visible = false; _tray.Dispose(); } catch { }
             foreach (var s in _strips)
             {
