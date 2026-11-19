@@ -100,6 +100,7 @@ namespace KomorebiTaskbarInfo
         int _tick;
         DateTime _lastWhkdStart = DateTime.MinValue;
         Process _whkdProc;
+        volatile string _forceRefresh;
         volatile string _webLine = "";
         volatile string _webLineFull = "";
         TcpListener _http;
@@ -153,6 +154,8 @@ namespace KomorebiTaskbarInfo
             _tray.Visible = true;
             SetTray("?", "komorebi · 正在连接", false);
 
+            HookSystemEvents();
+
             try
             {
                 _taskbarList = (ITaskbarList)new CTaskbarList();
@@ -191,6 +194,35 @@ namespace KomorebiTaskbarInfo
             http.Start();
 
             Log("started");
+        }
+
+        void HookSystemEvents()
+        {
+            // After a sign-in or a Modern Standby resume the taskbar is not
+            // painted yet, so the background sampled from its pixels is the
+            // wallpaper (or black) and the strip shows as a coloured square
+            // until the next 2s sample. Re-sample as soon as the desktop comes
+            // back instead of waiting for the timer.
+            try
+            {
+                SystemEvents.PowerModeChanged += delegate { ForceRefresh("power"); };
+                SystemEvents.SessionSwitch += delegate { ForceRefresh("session"); };
+                SystemEvents.DisplaySettingsChanged += delegate { ForceRefresh("display"); };
+                SystemEvents.UserPreferenceChanged += delegate { ForceRefresh("preferences"); };
+            }
+            catch (Exception ex)
+            {
+                Log("system events: " + ex.Message);
+            }
+        }
+
+        void ForceRefresh(string reason)
+        {
+            try
+            {
+                _marshal.BeginInvoke((Action)delegate { _forceRefresh = reason; });
+            }
+            catch { }
         }
 
         internal static void Log(string message)
@@ -294,6 +326,20 @@ namespace KomorebiTaskbarInfo
                 // as events, so the capsule itself updates instantly.
                 if (_tick % 3 == 1) RebuildStrips();
                 if (_tick % 5 == 1) { ReadTheme(); EnsureWhkd(); }
+
+                if (_forceRefresh != null)
+                {
+                    Log("resample after " + _forceRefresh);
+                    _forceRefresh = null;
+                    // The taskbar window may have been recreated by the shell
+                    // restore, so re-attach first, then force a fresh sample.
+                    RebuildStrips();
+                    foreach (var s in _strips.ToArray())
+                    {
+                        s.InvalidateBackgroundSample();
+                        if (s.Visible) s.RefreshBounds();
+                    }
+                }
 
                 bool fullscreen = IsFullscreenForeground();
                 if (fullscreen != _fullscreen)
@@ -1020,6 +1066,7 @@ namespace KomorebiTaskbarInfo
         Color _bgMid;
         Color _bgBottom;
         DateTime _lastSample = DateTime.MinValue;
+        DateTime _lastJumpLog = DateTime.MinValue;
 
         readonly IntPtr _taskbar;
         readonly bool _primary;
@@ -1042,6 +1089,14 @@ namespace KomorebiTaskbarInfo
         public IntPtr TaskbarHandle { get { return _taskbar; } }
         public bool IsPrimary { get { return _primary; } }
         public string LastLayoutLog = "";
+
+        // Drop the cached taskbar colours so the next RefreshBounds samples
+        // again (used after sign-in, resume, theme and display changes).
+        public void InvalidateBackgroundSample()
+        {
+            _lastSample = DateTime.MinValue;
+            _rendered = false;
+        }
 
         public Strip(IntPtr taskbar, string device, bool primary)
         {
@@ -1118,6 +1173,16 @@ namespace KomorebiTaskbarInfo
 
                     if (ColorDiff(c1, _bgTop) > 3 || ColorDiff(c2, _bgMid) > 3 || ColorDiff(c3, _bgBottom) > 3)
                     {
+                        int jump = Math.Max(ColorDiff(c1, _bgTop),
+                                   Math.Max(ColorDiff(c2, _bgMid), ColorDiff(c3, _bgBottom)));
+                        if (jump > 40 && (DateTime.Now - _lastJumpLog).TotalSeconds > 5)
+                        {
+                            _lastJumpLog = DateTime.Now;
+                            InfoContext.Log("bg jump on " + DeviceName +
+                                " rgb(" + _bgMid.R + "," + _bgMid.G + "," + _bgMid.B + ") -> rgb(" +
+                                c2.R + "," + c2.G + "," + c2.B + ")");
+                        }
+
                         _bgTop = c1;
                         _bgMid = c2;
                         _bgBottom = c3;
@@ -1141,6 +1206,9 @@ namespace KomorebiTaskbarInfo
 
         const int WM_NCHITTEST = 0x0084;
         const int WM_MOUSEACTIVATE = 0x0021;
+        const int WM_THEMECHANGED = 0x031A;
+        const int WM_DWMCOMPOSITIONCHANGED = 0x031E;
+        const int WM_DWMCOLORIZATIONCOLORCHANGED = 0x0320;
         const int HTTRANSPARENT = -1;
         const int MA_NOACTIVATE = 3;
 
@@ -1148,6 +1216,15 @@ namespace KomorebiTaskbarInfo
         {
             if (m.Msg == WM_NCHITTEST) { m.Result = new IntPtr(HTTRANSPARENT); return; }
             if (m.Msg == WM_MOUSEACTIVATE) { m.Result = new IntPtr(MA_NOACTIVATE); return; }
+
+            // Theme / composition changes alter the taskbar colours under us.
+            if (m.Msg == WM_THEMECHANGED || m.Msg == WM_DWMCOMPOSITIONCHANGED ||
+                m.Msg == WM_DWMCOLORIZATIONCOLORCHANGED)
+            {
+                InvalidateBackgroundSample();
+                return;
+            }
+
             base.WndProc(ref m);
         }
 
