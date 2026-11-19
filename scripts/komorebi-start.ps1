@@ -24,13 +24,8 @@ if ($up) {
     Log 'WARNING: komorebi is not running (did the elevated scheduled task start?)'
 }
 
-$whkd = Join-Path $env:ProgramFiles 'whkd\bin\whkd.exe'
-if (-not (Get-Process whkd -ErrorAction SilentlyContinue)) {
-    Log 'starting whkd'
-    Start-Process -FilePath $whkd -WindowStyle Hidden
-} else {
-    Log 'whkd already running'
-}
+# whkd is started (and supervised) by WorkspaceTray: that way the tray owns the
+# process, redirects its stdout/stderr and can log the exit code when it dies.
 
 $tray = Join-Path $env:LOCALAPPDATA 'Programs\WorkspaceTray\WorkspaceTray.exe'
 if (Test-Path $tray) {

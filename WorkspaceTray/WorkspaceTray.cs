@@ -99,6 +99,7 @@ namespace KomorebiTaskbarInfo
         Dictionary<string, object> _state;
         int _tick;
         DateTime _lastWhkdStart = DateTime.MinValue;
+        Process _whkdProc;
         volatile string _webLine = "";
         volatile string _webLineFull = "";
         TcpListener _http;
@@ -315,30 +316,59 @@ namespace KomorebiTaskbarInfo
             }
         }
 
-        // whkd provides every keybinding, but it has no supervision of its own:
-        // the "restart whkd" binding kills it from a child shell and, if whkd
-        // keeps its children in a job object, the replacement never launches.
-        // Shortcuts then stay dead until the next login, so keep an eye on it.
+        // whkd provides every keybinding and has no supervision of its own. Its
+        // main() returns silently after event_loop(), and every executed
+        // binding is printed to stdout, so a broken console makes it panic
+        // with nothing recorded anywhere. The tray therefore owns the process:
+        // stdout/stderr are redirected (no console dependency) and the exit
+        // code is logged, which is the only way to tell a clean exit (0) from
+        // a panic (101) or a kill (0xFFFFFFFF).
         void EnsureWhkd()
         {
+            if (!_watchWhkd) return;
+
             try
             {
-                if (!_watchWhkd) return;
+                if (_whkdProc != null)
+                {
+                    if (!_whkdProc.HasExited) return;
+                    int code = 0;
+                    try { code = _whkdProc.ExitCode; } catch { }
+                    Log("whkd exited with code 0x" + code.ToString("X8"));
+                    try { _whkdProc.Dispose(); } catch { }
+                    _whkdProc = null;
+                }
+
+                // Started by something else (e.g. an older tray): monitor, but
+                // the exit code is not observable in that case.
                 if (Process.GetProcessesByName("whkd").Length > 0) return;
-                if ((DateTime.Now - _lastWhkdStart).TotalSeconds < 20) return;
+                if ((DateTime.Now - _lastWhkdStart).TotalSeconds < 10) return;
 
                 string whkd = System.IO.Path.Combine(
                     Environment.GetFolderPath(Environment.SpecialFolder.ProgramFiles),
                     "whkd", "bin", "whkd.exe");
                 if (!System.IO.File.Exists(whkd)) return;
 
-                _lastWhkdStart = DateTime.Now;
                 var psi = new ProcessStartInfo(whkd);
                 psi.UseShellExecute = false;
                 psi.CreateNoWindow = true;
-                psi.WindowStyle = ProcessWindowStyle.Hidden;
-                Process.Start(psi);
-                Log("whkd was not running, restarted");
+                psi.RedirectStandardOutput = true;
+                psi.RedirectStandardError = true;
+
+                var proc = new Process();
+                proc.StartInfo = psi;
+                proc.OutputDataReceived += delegate { };
+                proc.ErrorDataReceived += delegate(object sender, DataReceivedEventArgs e)
+                {
+                    if (!string.IsNullOrEmpty(e.Data)) Log("whkd stderr: " + e.Data);
+                };
+                proc.Start();
+                proc.BeginOutputReadLine();
+                proc.BeginErrorReadLine();
+
+                _whkdProc = proc;
+                _lastWhkdStart = DateTime.Now;
+                Log("whkd started by tray (pid " + proc.Id + ")");
             }
             catch (Exception ex)
             {
