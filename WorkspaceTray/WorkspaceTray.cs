@@ -146,8 +146,15 @@ namespace KomorebiTaskbarInfo
             var restart = new ToolStripMenuItem("重启 komorebi");
             restart.Click += delegate { RestartKomorebi(); };
             menu.Items.Add(restart);
-            var quit = new ToolStripMenuItem("退出");
-            quit.Click += delegate { ExitApp(); };
+            var quit = new ToolStripMenuItem("退出（whkd 继续运行）");
+            quit.Click += delegate
+            {
+                DialogResult answer = MessageBox.Show(
+                    "退出托盘图标和任务栏胶囊？\n\nwhkd 会继续运行，快捷键不受影响；" +
+                    "下次登录会自动重新启动托盘。",
+                    "WorkspaceTray", MessageBoxButtons.OKCancel, MessageBoxIcon.Question);
+                if (answer == DialogResult.OK) ExitApp();
+            };
             menu.Items.Add(quit);
 
             _tray = new NotifyIcon();
@@ -1072,15 +1079,12 @@ namespace KomorebiTaskbarInfo
             }
             try { if (_http != null) _http.Stop(); } catch { }
             try { _timer.Stop(); } catch { }
-            // Do not leave whkd behind with a stdout pipe that no longer has a
-            // reader: its next println! would panic it. The next tray starts a
-            // fresh instance. whkd is a grandchild (cmd wraps it), so kill by
-            // name rather than through _whkdProc.
-            try
-            {
-                foreach (var p in Process.GetProcessesByName("whkd")) { try { p.Kill(); } catch { } }
-            }
-            catch { }
+            // whkd's stdout/stderr go to files through cmd, not to a pipe that
+            // dies with this process, so it can keep running: quitting the tray
+            // must not take every keybinding with it (that is how hotkeys
+            // "stopped working" while the desktop looked fine). A later tray
+            // replaces the orphan with a fresh instance on startup.
+            Log("exit requested, leaving whkd running");
             try { _tray.Visible = false; _tray.Dispose(); } catch { }
             foreach (var s in _strips)
             {
