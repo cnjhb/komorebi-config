@@ -137,6 +137,13 @@ Error: failed call to AllowSetForegroundWindow after 5 retries
 - **Startup 快捷方式**（普通权限，由资源管理器启动）→ `komorebi-start.ps1`
   - 先等 komorebi 起来，再启动 whkd 和任务栏信息条
   - 用快捷方式而不是别的进程树，避免它们被连带清理
+- **计划任务 `komorebi-tray`**（普通权限，登录后延迟 20 秒，也用于手动启动）→ `WorkspaceTray.exe`
+  - 托盘永远由任务计划启动，不要从终端 `Start-Process`：终端（opencode-pty、VS Code、Windows Terminal 的某些宿主）会把自己的子进程放进带 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 的 job 里，终端一关，内核会**静默**杀掉整棵树（没有崩溃报告、没有退出码），胶囊和 whkd 一起消失，而 komorebi 因为由计划任务启动，会继续平铺
+  - 手动重启：`Start-ScheduledTask komorebi-tray`（任务里 `MultipleInstances=IgnoreNew`，已在跑就什么也不做）
+- **计划任务 `komorebi-watchdog`**（每分钟）→ `komorebi-watchdog.ps1`
+  - komorebi 没了 → 启动 `komorebi` 任务
+  - 托盘没了且没有 `.workspace-tray-quit` 标记 → 启动 `komorebi-tray` 任务
+  - 托盘菜单里的「退出」会写这个标记（并留 whkd 继续跑），所以主动退出不会被看门狗立刻拉回来；下次登录时清除
 
 注意：隐藏窗口启动很重要。直接 `Start-Process -Verb RunAs` 启动会留下一个标题为 `C:\Program Files\komorebi\bin\komorebi.exe` 的控制台窗口，关掉它就等于杀掉 komorebi。
 
@@ -148,6 +155,7 @@ Error: failed call to AllowSetForegroundWindow after 5 retries
 | `%USERPROFILE%\launch-focused.log` | 应用启动/搬移结果 |
 | `%USERPROFILE%\move-to-monitor.log` | `win+o` 移动窗口的结果 |
 | `%USERPROFILE%\taskbar-info.log` | 任务栏信息条连接/渲染，以及 whkd 的启动、退出码、stderr |
+| `%USERPROFILE%\komorebi-watchdog.log` | 看门狗每次拉起 komorebi / 托盘的记录 |
 | `%USERPROFILE%\whkd-stdout.log` | whkd 执行过的快捷键命令（每次启动时清空） |
 | `%USERPROFILE%\whkd-stderr.log` | whkd 的错误输出 / panic（每次启动时清空） |
 | `%USERPROFILE%\komorebi-stderr.log` | komorebi 的 panic 输出（正常为空） |

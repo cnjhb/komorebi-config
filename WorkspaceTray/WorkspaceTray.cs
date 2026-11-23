@@ -19,6 +19,12 @@ namespace KomorebiTaskbarInfo
 {
     static class Program
     {
+        // Written when the user quits on purpose; the watchdog task uses it to
+        // tell "the tray crashed" from "the tray was told to go away".
+        internal static readonly string QuitFlag = System.IO.Path.Combine(
+            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
+            ".workspace-tray-quit");
+
         [STAThread]
         static void Main(string[] args)
         {
@@ -26,6 +32,7 @@ namespace KomorebiTaskbarInfo
             using (var mutex = new Mutex(true, @"Global\KomorebiTaskbarInfo", out createdNew))
             {
                 if (!createdNew) return;
+                try { System.IO.File.Delete(QuitFlag); } catch { }
                 try { Native.SetProcessDpiAwarenessContext(new IntPtr(-4)); } catch { }
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
@@ -1085,6 +1092,12 @@ namespace KomorebiTaskbarInfo
             // "stopped working" while the desktop looked fine). A later tray
             // replaces the orphan with a fresh instance on startup.
             Log("exit requested, leaving whkd running");
+            try
+            {
+                System.IO.File.WriteAllText(Program.QuitFlag,
+                    DateTime.Now.ToString("o"));
+            }
+            catch { }
             try { _tray.Visible = false; _tray.Dispose(); } catch { }
             foreach (var s in _strips)
             {

@@ -2,7 +2,10 @@
 
 # ===== komorebi / reload =====
 win + ctrl + r          : komorebic reload-configuration
-win + ctrl + shift + r  : Stop-Process -Name whkd -Force -ErrorAction SilentlyContinue; Start-Process "$env:ProgramFiles\whkd\bin\whkd.exe" -WindowStyle Hidden
+# Kill whkd and let WorkspaceTray respawn it with stdout/stderr redirected to
+# files. Starting whkd here directly would give it no console, and Rust's
+# println! panics on a broken stdout handle (WER: whkd.exe 0xc0000409).
+win + ctrl + shift + r  : Stop-Process -Name whkd -Force -ErrorAction SilentlyContinue
 win + shift + r         : komorebic retile
 win + s                 : komorebic toggle-shortcuts
 

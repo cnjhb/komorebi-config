@@ -43,6 +43,9 @@ Copy-Item (Join-Path $root 'scripts\komorebi-elevated.ps1') $programs -Force
 Copy-Item (Join-Path $root 'scripts\install-komorebi-task.ps1') $programs -Force
 Copy-Item (Join-Path $root 'scripts\launch-focused.ps1') $programs -Force
 Copy-Item (Join-Path $root 'scripts\move-to-monitor.ps1') $programs -Force
+Copy-Item (Join-Path $root 'scripts\komorebi-watchdog.ps1') $programs -Force
+Copy-Item (Join-Path $root 'scripts\install-watchdog-task.ps1') $programs -Force
+Copy-Item (Join-Path $root 'scripts\install-tray-task.ps1') $programs -Force
 Copy-Item (Join-Path $root 'WorkspaceTray\WorkspaceTray.cs') $trayDir -Force
 Copy-Item (Join-Path $root 'WorkspaceTray\app.manifest')     $trayDir -Force
 Copy-Item (Join-Path $root 'WorkspaceTray\build.ps1')        $trayDir -Force
@@ -70,6 +73,12 @@ Write-Host "startup shortcut: $lnkPath"
 
 Write-Host 'registering the komorebi scheduled task (highest privileges, UAC prompt)'
 & (Join-Path $root 'scripts\install-komorebi-task.ps1')
+
+Write-Host 'registering the tray scheduled task'
+& (Join-Path $programs 'install-tray-task.ps1')
+
+Write-Host 'registering the watchdog scheduled task (every minute)'
+& (Join-Path $programs 'install-watchdog-task.ps1')
 
 Write-Host ''
 Write-Host 'Installed. To apply now:'
