@@ -986,17 +986,23 @@ namespace KomorebiTaskbarInfo
         {
             while (!_exit)
             {
+                Process subscriber = null;
                 try
                 {
+                    // MaxAllowedServerInstances, not 1: when komorebi restarts,
+                    // the previous `komorebic subscribe-pipe` can keep the single
+                    // instance alive for a while and the worker then spun on
+                    // "All pipe instances are busy" every second, leaving the
+                    // capsule frozen forever instead of reconnecting.
                     using (var pipe = new System.IO.Pipes.NamedPipeServerStream(
                         PipeName,
                         System.IO.Pipes.PipeDirection.InOut,
-                        1,
+                        System.IO.Pipes.NamedPipeServerStream.MaxAllowedServerInstances,
                         System.IO.Pipes.PipeTransmissionMode.Byte,
                         System.IO.Pipes.PipeOptions.None))
                     {
                         var wait = pipe.WaitForConnectionAsync();
-                        Subscribe();
+                        subscriber = Subscribe();
                         if (!wait.Wait(4000)) continue;
 
                         Log("subscriber connected");
@@ -1037,23 +1043,38 @@ namespace KomorebiTaskbarInfo
                 {
                     Log("worker: " + ex.Message);
                 }
+                finally
+                {
+                    // `komorebic subscribe-pipe` outlives the pipe if komorebi
+                    // died mid-stream; kill it so it cannot hold the next
+                    // server instance.
+                    try
+                    {
+                        if (subscriber != null)
+                        {
+                            if (!subscriber.HasExited) subscriber.Kill();
+                            subscriber.Dispose();
+                        }
+                    }
+                    catch { }
+                }
                 Thread.Sleep(1000);
             }
         }
 
-        void Subscribe()
+        Process Subscribe()
         {
             try
             {
                 var psi = new ProcessStartInfo(Komorebic, "subscribe-pipe " + PipeName);
                 psi.CreateNoWindow = true;
                 psi.UseShellExecute = false;
-                using (var p = Process.Start(psi))
-                {
-                    p.WaitForExit(3000);
-                }
+                return Process.Start(psi);
             }
-            catch { }
+            catch
+            {
+                return null;
+            }
         }
 
         void RestartKomorebi()
@@ -1252,12 +1273,17 @@ namespace KomorebiTaskbarInfo
             RECT tr;
             if (!Native.GetWindowRect(_taskbar, out tr)) return;
 
-            int startLeft = tr.Right;
+            // The secondary taskbar lives at a negative X, so everything here
+            // has to be relative to its own rect. Using tr.Right as the start
+            // button edge made maxWidth negative (-1920+1920-8-8) and the strip
+            // stayed at its 1x1 constructor bounds.
+            int taskbarWidth = tr.Right - tr.Left;
+            int startLeft = taskbarWidth;
             IntPtr start = Native.FindWindowEx(_taskbar, IntPtr.Zero, "Start", null);
             if (start != IntPtr.Zero)
             {
                 RECT sr;
-                if (Native.GetWindowRect(start, out sr)) startLeft = sr.Left;
+                if (Native.GetWindowRect(start, out sr)) startLeft = sr.Left - tr.Left;
             }
 
             int inset = 4;
@@ -1279,13 +1305,23 @@ namespace KomorebiTaskbarInfo
 
             int width = Math.Min(maxWidth, Math.Max(140, (int)Math.Ceiling(content + pad)));
 
-            var desired = new Rectangle(left, tr.Top + inset, width, height);
+            var desired = new Rectangle(tr.Left + left, tr.Top + inset, width, height);
             bool changed = desired.Width != _bounds.Width || desired.Height != _bounds.Height ||
                            desired.X != _bounds.X || desired.Y != _bounds.Y;
             _bounds = desired;
 
+            // WinForms handles WM_DPICHANGED itself when the window crosses to
+            // a monitor with another scale factor and resizes the form; the
+            // cached desired rect would then match and we would never correct
+            // it. Compare with the real window rect as well.
+            RECT actual;
+            bool misplaced = Native.GetWindowRect(Handle, out actual) &&
+                (actual.Left != desired.X || actual.Top != desired.Y ||
+                 actual.Right - actual.Left != desired.Width ||
+                 actual.Bottom - actual.Top != desired.Height);
+
             _refreshCount++;
-            if (changed || !_rendered)
+            if (changed || misplaced || !_rendered)
             {
                 Native.SetWindowPos(Handle, Native.HWND_TOPMOST, desired.X, desired.Y, desired.Width, desired.Height,
                     Native.SWP_NOACTIVATE | Native.SWP_SHOWWINDOW);
