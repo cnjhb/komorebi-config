@@ -3,6 +3,13 @@
 # Windows 11 26H2 made AllowSetForegroundWindow fail for a medium-integrity
 # process, so komorebi.exe exits at startup unless it runs elevated. This
 # script is launched at logon by the "komorebi" scheduled task.
+#
+# The call can still be refused for a while after logon (it fails while the
+# input desktop is not the interactive one, i.e. locked / session not ready),
+# and komorebi exits with "failed call to AllowSetForegroundWindow after 5
+# retries". Instead of 5 tries x 20s we retry for up to ~9 minutes and log the
+# input desktop, the foreground window and a direct ASFW probe on every try,
+# so the next failure says exactly which state was blocking it.
 
 $ErrorActionPreference = 'Continue'
 $log = Join-Path $env:USERPROFILE 'komorebi-start.log'
@@ -22,6 +29,52 @@ function Test-Komorebi {
     return ($LASTEXITCODE -eq 0)
 }
 
+# Input desktop name (Winlogon while locked), foreground window, and a direct
+# AllowSetForegroundWindow probe. Calling ASFW here is harmless: it is exactly
+# the permission komorebi is asking for.
+function Get-Diag {
+    try {
+        Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+using System.Text;
+public static class WmDiag {
+  [DllImport("user32.dll")] public static extern IntPtr OpenInputDesktop(uint flags, bool inherit, uint access);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern bool GetUserObjectInformation(IntPtr h, int index, StringBuilder info, int len, out int needed);
+  [DllImport("user32.dll")] public static extern bool CloseDesktop(IntPtr h);
+  [DllImport("user32.dll")] public static extern IntPtr GetForegroundWindow();
+  [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32.dll", SetLastError=true)] public static extern bool AllowSetForegroundWindow(uint pid);
+  public static string Diag() {
+    string desktop = "?";
+    IntPtr d = OpenInputDesktop(0, false, 0x0001);
+    if (d != IntPtr.Zero) {
+      var sb = new StringBuilder(256); int needed;
+      if (GetUserObjectInformation(d, 2, sb, 256, out needed)) desktop = sb.ToString();
+      CloseDesktop(d);
+    }
+    IntPtr fg = GetForegroundWindow();
+    uint pid = 0; string cls = "";
+    if (fg != IntPtr.Zero) {
+      GetWindowThreadProcessId(fg, out pid);
+      var c = new StringBuilder(128); GetClassName(fg, c, 128); cls = c.ToString();
+    }
+    bool asfw = AllowSetForegroundWindow(0xFFFFFFFF);
+    int err = Marshal.GetLastWin32Error();
+    return "inputDesktop=" + desktop + " foreground=pid " + pid + " class " + cls +
+           " ASFW=" + asfw + " err=" + err;
+  }
+}
+"@
+        return [WmDiag]::Diag()
+    } catch {
+        return "diag failed: $($_.Exception.Message)"
+    }
+}
+
+Log ('diag: ' + (Get-Diag))
+
 if (Test-Komorebi) {
     Log 'komorebi already running'
     return
@@ -35,10 +88,24 @@ for ($i = 0; $i -lt 60; $i++) {
 Start-Sleep -Seconds 3
 
 # komorebi tries to lower the foreground lock timeout itself, but that call is
-# also refused on this build, so set it while we still can (elevated).
+# also refused on this build, so set it while we still can (elevated). Writing
+# the registry is not enough for the running session: SPI_SETFOREGROUNDLOCKTIMEOUT
+# applies it to the current session immediately.
 Set-ItemProperty 'HKCU:\Control Panel\Desktop' -Name ForegroundLockTimeout -Value 0 -ErrorAction SilentlyContinue
+try {
+    Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public static class SpiLock {
+  [DllImport("user32.dll", SetLastError=true)]
+  public static extern bool SystemParametersInfo(uint action, uint param, IntPtr data, uint winIni);
+  public static bool Clear() { return SystemParametersInfo(0x2003, 0, IntPtr.Zero, 0); }
+}
+"@
+    [void][SpiLock]::Clear()
+} catch { }
 
-for ($attempt = 1; $attempt -le 5; $attempt++) {
+for ($attempt = 1; $attempt -le 60; $attempt++) {
     if (Test-Komorebi) { break }
 
     Log "starting komorebi (elevated, attempt $attempt)"
@@ -48,21 +115,21 @@ for ($attempt = 1; $attempt -le 5; $attempt++) {
         -ErrorAction SilentlyContinue
 
     $up = $false
-    for ($i = 0; $i -lt 40; $i++) {
+    for ($i = 0; $i -lt 12; $i++) {
         Start-Sleep -Milliseconds 500
         if (Test-Komorebi) { $up = $true; break }
     }
 
     if ($up) {
-        Log 'komorebi is up (elevated)'
+        Log "komorebi is up (elevated, attempt $attempt)"
         return
     }
 
-    Log "attempt $attempt failed"
     $err = Get-Content (Join-Path $env:USERPROFILE 'komorebi-stderr.log') -Raw -ErrorAction SilentlyContinue
-    if ($err) { Log ($err.Trim()) }
+    Log "attempt $attempt failed: $($err.Trim())"
+    Log ('diag: ' + (Get-Diag))
     Get-Process komorebi -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
-    Start-Sleep -Seconds 5
+    Start-Sleep -Seconds 3
 }
 
 Log 'WARNING: komorebi did not come up (elevated)'
