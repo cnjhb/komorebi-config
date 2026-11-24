@@ -15,12 +15,20 @@ komorebi-config/
 │   ├── komorebi-start.ps1     # 登录启动：等待 komorebi → whkd + 任务栏信息条
 │   ├── komorebi-elevated.ps1  # 计划任务用它提权启动 komorebi（带重试）
 │   ├── install-komorebi-task.ps1  # 注册「komorebi」登录计划任务（需要 UAC）
+│   ├── install-tray-task.ps1  # 注册「komorebi-tray」任务（托盘不落在终端 job 里）
+│   ├── install-watchdog-task.ps1  # 注册「komorebi-watchdog」分钟级任务
 │   ├── launch-focused.ps1     # 在当前聚焦的屏幕/工作区启动终端/Firefox
 │   ├── move-to-monitor.ps1    # win+o：把窗口移到下一块屏（绕过 monocle 下的 komorebi bug）
 ├── WorkspaceTray/
 │   ├── WorkspaceTray.cs       # 任务栏信息条（C# / WinForms）
 │   ├── app.manifest           # PerMonitorV2 DPI 声明
 │   └── build.ps1              # 用 .NET Framework csc 编译
+├── Watchdog/
+│   ├── komorebi-watchdog.cs   # 分钟级看门狗（winexe，无控制台）
+│   └── build.ps1
+├── Tools/
+│   ├── runhidden.cs           # CREATE_NO_WINDOW 启动器（避免 Windows Terminal 闪窗）
+│   └── build.ps1
 ├── legacy/                    # 已弃用的双屏 komorebi-bar 配置（仅供参考）
 └── install.ps1
 ```
@@ -140,10 +148,13 @@ Error: failed call to AllowSetForegroundWindow after 5 retries
 - **计划任务 `komorebi-tray`**（普通权限，登录后延迟 20 秒，也用于手动启动）→ `WorkspaceTray.exe`
   - 托盘永远由任务计划启动，不要从终端 `Start-Process`：终端（opencode-pty、VS Code、Windows Terminal 的某些宿主）会把自己的子进程放进带 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 的 job 里，终端一关，内核会**静默**杀掉整棵树（没有崩溃报告、没有退出码），胶囊和 whkd 一起消失，而 komorebi 因为由计划任务启动，会继续平铺
   - 手动重启：`Start-ScheduledTask komorebi-tray`（任务里 `MultipleInstances=IgnoreNew`，已在跑就什么也不做）
-- **计划任务 `komorebi-watchdog`**（每分钟）→ `komorebi-watchdog.ps1`
+- **计划任务 `komorebi-watchdog`**（每分钟）→ `komorebi-watchdog.exe`
   - komorebi 没了 → 启动 `komorebi` 任务
   - 托盘没了且没有 `.workspace-tray-quit` 标记 → 启动 `komorebi-tray` 任务
   - 托盘菜单里的「退出」会写这个标记（并留 whkd 继续跑），所以主动退出不会被看门狗立刻拉回来；下次登录时清除
+- **`runhidden.exe`**：所有需要跑 PowerShell 的地方都经过它（GUI 子系统 + `CREATE_NO_WINDOW`）
+  - 原因：默认终端是 Windows Terminal 时，`powershell.exe -WindowStyle Hidden` **仍然会弹出 WT 窗口**（WT 忽略 `STARTF_USESHOWWINDOW`）。看门狗最初是 .ps1 + 每分钟计划任务，结果每分钟闪一个 1168×704 的 WT 窗口
+  - 启动脚本快捷方式也改成 `runhidden.exe "powershell.exe ... -File komorebi-start.ps1"`，登录时不再挂着一个终端窗口
 
 注意：隐藏窗口启动很重要。直接 `Start-Process -Verb RunAs` 启动会留下一个标题为 `C:\Program Files\komorebi\bin\komorebi.exe` 的控制台窗口，关掉它就等于杀掉 komorebi。
 

@@ -1,10 +1,13 @@
 # Registers the "komorebi-watchdog" scheduled task: every minute it checks that
 # komorebi and WorkspaceTray are alive and restarts whatever is missing.
 #
-# The restart goes through the scheduled tasks (Start-ScheduledTask) instead of
-# Start-Process, because a process started from a terminal inherits that
-# terminal's job object; many terminals use KILL_ON_JOB_CLOSE, which would take
-# the tray down again the moment the terminal closes.
+# The action is a GUI-subsystem executable (komorebi-watchdog.exe), not
+# powershell.exe: with Windows Terminal as the default terminal, a console app
+# started by Task Scheduler opens a visible WT window that ignores
+# -WindowStyle Hidden, i.e. a window flashes every time the task runs.
+#
+# The restarts themselves also go through scheduled tasks (schtasks /run), so
+# the started processes are not children of this task's job object.
 #
 # Runs as the current user at the current integrity level (the tray must not be
 # elevated), so no UAC prompt is needed.
@@ -12,16 +15,14 @@
 $ErrorActionPreference = 'Stop'
 
 $taskName = 'komorebi-watchdog'
-$script   = Join-Path $env:LOCALAPPDATA 'Programs\komorebi-watchdog.ps1'
+$exe      = Join-Path $env:LOCALAPPDATA 'Programs\komorebi-watchdog.exe'
 
-if (-not (Test-Path $script))
+if (-not (Test-Path $exe))
 {
-    throw "watchdog script not found: $script (run install.ps1 first)"
+    throw "watchdog executable not found: $exe (run install.ps1 first)"
 }
 
-$action = New-ScheduledTaskAction `
-    -Execute (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') `
-    -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$script`""
+$action = New-ScheduledTaskAction -Execute $exe
 
 # A logon trigger alone never repeats in an already-running session, so use a
 # time trigger with an explicit (long) duration: runs every minute, survives
@@ -41,4 +42,4 @@ Register-ScheduledTask -TaskName $taskName -Action $action -Trigger $trigger `
     -Settings $settings -Principal $principal -Force `
     -Description 'Restart komorebi / WorkspaceTray when they die (whkd comes with the tray)' | Out-Null
 
-Write-Host "scheduled task '$taskName' registered (every minute)"
+Write-Host "scheduled task '$taskName' registered (every minute, no console window)"

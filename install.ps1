@@ -43,7 +43,6 @@ Copy-Item (Join-Path $root 'scripts\komorebi-elevated.ps1') $programs -Force
 Copy-Item (Join-Path $root 'scripts\install-komorebi-task.ps1') $programs -Force
 Copy-Item (Join-Path $root 'scripts\launch-focused.ps1') $programs -Force
 Copy-Item (Join-Path $root 'scripts\move-to-monitor.ps1') $programs -Force
-Copy-Item (Join-Path $root 'scripts\komorebi-watchdog.ps1') $programs -Force
 Copy-Item (Join-Path $root 'scripts\install-watchdog-task.ps1') $programs -Force
 Copy-Item (Join-Path $root 'scripts\install-tray-task.ps1') $programs -Force
 Copy-Item (Join-Path $root 'WorkspaceTray\WorkspaceTray.cs') $trayDir -Force
@@ -60,11 +59,17 @@ if ($runningTray) {
 }
 & (Join-Path $trayDir 'build.ps1') | Out-Host
 
+Write-Host 'compiling the watchdog and the hidden launcher...'
+& (Join-Path $root 'Watchdog\build.ps1') -OutputDir $programs | Out-Host
+& (Join-Path $root 'Tools\build.ps1') -OutputDir $programs | Out-Host
+
 $lnkPath  = Join-Path ([Environment]::GetFolderPath('Startup')) 'komorebi.lnk'
 $wsh      = New-Object -ComObject WScript.Shell
 $shortcut = $wsh.CreateShortcut($lnkPath)
-$shortcut.TargetPath       = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
-$shortcut.Arguments        = "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$programs\komorebi-start.ps1`""
+# runhidden.exe, not powershell.exe: with Windows Terminal as the default
+# terminal, -WindowStyle Hidden still shows a WT window for the whole script.
+$shortcut.TargetPath       = Join-Path $programs 'runhidden.exe'
+$shortcut.Arguments        = "`"$(Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe')`" -NoProfile -ExecutionPolicy Bypass -File `"$programs\komorebi-start.ps1`""
 $shortcut.WorkingDirectory = $userProfile
 $shortcut.IconLocation     = "$komorebic,0"
 $shortcut.Description      = 'Start whkd and the taskbar workspace strip (komorebi itself is started by the komorebi scheduled task)'

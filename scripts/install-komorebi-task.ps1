@@ -42,8 +42,13 @@ if (-not $isAdmin) {
 }
 
 try {
-    $action = New-ScheduledTaskAction -Execute (Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe') `
-        -Argument "-NoProfile -ExecutionPolicy Bypass -WindowStyle Hidden -File `"$logon`""
+    # runhidden.exe (GUI subsystem, CREATE_NO_WINDOW): powershell.exe with
+    # -WindowStyle Hidden still opens a Windows Terminal window when WT is the
+    # default terminal, so the logon script would show one for its whole run.
+    $launcher = Join-Path $env:LOCALAPPDATA 'Programs\runhidden.exe'
+    $powershell = Join-Path $env:SystemRoot 'System32\WindowsPowerShell\v1.0\powershell.exe'
+    $action = New-ScheduledTaskAction -Execute $launcher `
+        -Argument "`"$powershell`" -NoProfile -ExecutionPolicy Bypass -File `"$logon`""
     $trigger = New-ScheduledTaskTrigger -AtLogOn -User "$env:COMPUTERNAME\$env:USERNAME"
     $trigger.Delay = 'PT10S'
     $settings = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
