@@ -992,18 +992,28 @@ namespace KomorebiTaskbarInfo
                     // MaxAllowedServerInstances, not 1: when komorebi restarts,
                     // the previous `komorebic subscribe-pipe` can keep the single
                     // instance alive for a while and the worker then spun on
-                    // "All pipe instances are busy" every second, leaving the
-                    // capsule frozen forever instead of reconnecting.
+                    // "All pipe instances are busy" every second.
+                    using (var cts = new CancellationTokenSource())
                     using (var pipe = new System.IO.Pipes.NamedPipeServerStream(
                         PipeName,
                         System.IO.Pipes.PipeDirection.InOut,
                         System.IO.Pipes.NamedPipeServerStream.MaxAllowedServerInstances,
                         System.IO.Pipes.PipeTransmissionMode.Byte,
-                        System.IO.Pipes.PipeOptions.None))
+                        System.IO.Pipes.PipeOptions.Asynchronous))
                     {
-                        var wait = pipe.WaitForConnectionAsync();
+                        var wait = pipe.WaitForConnectionAsync(cts.Token);
                         subscriber = Subscribe();
-                        if (!wait.Wait(4000)) continue;
+                        if (!wait.Wait(4000))
+                        {
+                            // Cancel the pending wait *before* disposing: Dispose
+                            // on a server with an outstanding WaitForConnectionAsync
+                            // blocks until someone connects. That is how the tray
+                            // stayed dead after starting while komorebi was down -
+                            // pipe open, no subscriber, no log lines at all.
+                            cts.Cancel();
+                            try { wait.Wait(1500); } catch { }
+                            continue;
+                        }
 
                         Log("subscriber connected");
                         using (var reader = new System.IO.StreamReader(pipe, Encoding.UTF8))

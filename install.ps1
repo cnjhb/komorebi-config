@@ -40,6 +40,7 @@ Copy-Item (Join-Path $root 'komorebi\applications.json') (Join-Path $userProfile
 Copy-Item (Join-Path $root 'whkd\whkdrc')                (Join-Path $configDir 'whkdrc') -Force
 Copy-Item (Join-Path $root 'scripts\komorebi-start.ps1') $programs -Force
 Copy-Item (Join-Path $root 'scripts\komorebi-elevated.ps1') $programs -Force
+Copy-Item (Join-Path $root 'scripts\adopt-windows.ps1') $programs -Force
 Copy-Item (Join-Path $root 'scripts\install-komorebi-task.ps1') $programs -Force
 Copy-Item (Join-Path $root 'scripts\launch-focused.ps1') $programs -Force
 Copy-Item (Join-Path $root 'scripts\move-to-monitor.ps1') $programs -Force

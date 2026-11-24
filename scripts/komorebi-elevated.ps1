@@ -46,6 +46,7 @@ public static class WmDiag {
   [DllImport("user32.dll")] public static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
   [DllImport("user32.dll", CharSet=CharSet.Unicode)] public static extern int GetClassName(IntPtr h, StringBuilder s, int n);
   [DllImport("user32.dll", SetLastError=true)] public static extern bool AllowSetForegroundWindow(uint pid);
+  [DllImport("user32.dll", SetLastError=true)] public static extern bool SystemParametersInfo(uint action, uint param, out uint value, uint winIni);
   public static string Diag() {
     string desktop = "?";
     IntPtr d = OpenInputDesktop(0, false, 0x0001);
@@ -60,10 +61,15 @@ public static class WmDiag {
       GetWindowThreadProcessId(fg, out pid);
       var c = new StringBuilder(128); GetClassName(fg, c, 128); cls = c.ToString();
     }
-    bool asfw = AllowSetForegroundWindow(0xFFFFFFFF);
-    int err = Marshal.GetLastWin32Error();
+    uint lockTimeout = 999999;
+    SystemParametersInfo(0x2002, 0, out lockTimeout, 0);
+    bool self = AllowSetForegroundWindow((uint)System.Diagnostics.Process.GetCurrentProcess().Id);
+    int selfErr = Marshal.GetLastWin32Error();
+    bool any = AllowSetForegroundWindow(0xFFFFFFFF);
+    int anyErr = Marshal.GetLastWin32Error();
     return "inputDesktop=" + desktop + " foreground=pid " + pid + " class " + cls +
-           " ASFW=" + asfw + " err=" + err;
+           " lockTimeout=" + lockTimeout + " ASFW(self)=" + self + "/" + selfErr +
+           " ASFW(any)=" + any + "/" + anyErr;
   }
 }
 "@
@@ -122,11 +128,27 @@ for ($attempt = 1; $attempt -le 60; $attempt++) {
 
     if ($up) {
         Log "komorebi is up (elevated, attempt $attempt)"
+        # Windows that already existed when komorebi came up are not managed and
+        # float on top of the tiled ones; adopt them once.
+        $adopt = Join-Path $env:LOCALAPPDATA 'Programs\adopt-windows.ps1'
+        if (Test-Path $adopt) {
+            try {
+                $out = & $adopt 2>&1 | Out-String
+                foreach ($line in ($out -split "`n")) {
+                    if ($line.Trim()) { Log ("adopt: " + $line.Trim()) }
+                }
+            } catch {
+                Log "adopt failed: $($_.Exception.Message)"
+            }
+        }
         return
     }
 
     $err = Get-Content (Join-Path $env:USERPROFILE 'komorebi-stderr.log') -Raw -ErrorAction SilentlyContinue
+    $out = Get-Content (Join-Path $env:USERPROFILE 'komorebi-stdout.log') -ErrorAction SilentlyContinue |
+        Where-Object { $_ -match 'ERROR|WARN' } | Select-Object -Last 3
     Log "attempt $attempt failed: $($err.Trim())"
+    if ($out) { foreach ($line in $out) { Log ("  " + $line) } }
     Log ('diag: ' + (Get-Diag))
     Get-Process komorebi -ErrorAction SilentlyContinue | Stop-Process -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 3
