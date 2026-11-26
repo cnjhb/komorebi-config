@@ -67,8 +67,10 @@ static class Watchdog
                 @"Microsoft\Windows\Start Menu\Programs\Startup\komorebi.lnk");
             if (!File.Exists(lnk)) return false;
 
-            var psi = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "explorer.exe"),
-                                           "\"" + lnk + "\"");
+            // explorer.exe lives in %SystemRoot%, not System32.
+            string explorer = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe");
+            var psi = new ProcessStartInfo(explorer, "\"" + lnk + "\"");
             psi.UseShellExecute = false;
             psi.CreateNoWindow = true;
             using (Process p = Process.Start(psi)) p.WaitForExit(5000);
