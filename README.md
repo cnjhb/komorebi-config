@@ -130,26 +130,34 @@ Windows 11 任务栏没有第三方文字接口，所以用**置顶窗口**覆�
 
 ### 启动脚本（komorebi-start.ps1 / komorebi-elevated.ps1）
 
-komorebi 现在**必须提权运行**：Windows 11 26H2（build 26300）起，中完整性进程调用 `AllowSetForegroundWindow` 会被拒绝，`komorebi.exe` 启动后直接退出：
+komorebi 启动时第一件事是调用 `AllowSetForegroundWindow(自己的 pid)`，失败就直接退出：
 
 ```
 Error: failed call to AllowSetForegroundWindow after 5 retries
 ```
 
-所以启动拆成两部分：
+这个调用**能不能成功取决于谁启动它**，跟完整性级别无关。实测（同一秒、同一前台窗口）：
 
+```
+父进程 = pwsh.exe（终端）        ASFW(self)=False err=5 (ERROR_ACCESS_DENIED)
+父进程 = explorer.exe（Shell）    ASFW(self)=True  err=0
+```
+
+也就是说：由资源管理器（Shell）启动的进程链有前台权限；计划任务、终端启动的没有。所以 Windows 11 26H2 上「必须提权」的结论是错的——提权后的计划任务照样会被拒（只是有时候前台刚好是控制台窗口才碰巧成功），这才是 komorebi 时好时坏的真正原因。
+
+现在的启动顺序：
+
+- **Startup 快捷方式**（由资源管理器启动）→ `komorebi-start.ps1`
+  - 它自己启动 `komorebi.exe`（普通权限），因为它在 explorer 的进程链里，ASFW 一定成功
+  - 起完再启动 whkd / 任务栏信息条，并接管启动前已存在的窗口
 - **计划任务 `komorebi`**（最高权限，登录后延迟 10 秒）→ `komorebi-elevated.ps1`
-  - 等 explorer 就绪，把 `ForegroundLockTimeout` 置 0
-  - 隐藏窗口启动 `komorebi.exe`，stderr 重定向到 `komorebi-stderr.log`（komorebi 是 `panic=abort` 构建，崩溃时日志里没有信息，stderr 才有）
-  - 轮询 `komorebic state` 等待 socket 就绪，失败自动重试 5 次
-- **Startup 快捷方式**（普通权限，由资源管理器启动）→ `komorebi-start.ps1`
-  - 先等 komorebi 起来，再启动 whkd 和任务栏信息条
-  - 用快捷方式而不是别的进程树，避免它们被连带清理
+  - 只作为兜底：如果 Startup 脚本没起来，它还能拉一次；komorebi 拒绝第二个实例，所以不会打架
+  - 每次失败都会记录 `inputDesktop` / 前台窗口 / `ForegroundLockTimeout` / ASFW 返回值
 - **计划任务 `komorebi-tray`**（普通权限，登录后延迟 20 秒，也用于手动启动）→ `WorkspaceTray.exe`
-  - 托盘永远由任务计划启动，不要从终端 `Start-Process`：终端（opencode-pty、VS Code、Windows Terminal 的某些宿主）会把自己的子进程放进带 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 的 job 里，终端一关，内核会**静默**杀掉整棵树（没有崩溃报告、没有退出码），胶囊和 whkd 一起消失，而 komorebi 因为由计划任务启动，会继续平铺
+  - 托盘永远由任务计划启动，不要从终端 `Start-Process`：终端（opencode-pty、VS Code、Windows Terminal 的某些宿主）会把自己的子进程放进带 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE` 的 job 里，终端一关，内核会**静默**杀掉整棵树（没有崩溃报告、没有退出码），胶囊和 whkd 一起消失
   - 手动重启：`Start-ScheduledTask komorebi-tray`（任务里 `MultipleInstances=IgnoreNew`，已在跑就什么也不做）
 - **计划任务 `komorebi-watchdog`**（每分钟）→ `komorebi-watchdog.exe`
-  - komorebi 没了 → 启动 `komorebi` 任务
+  - komorebi 没了 → **通过 `explorer.exe` 跑 Startup 快捷方式**（拿到 shell 的 ASFW 权限），失败才退回 `komorebi` 任务
   - 托盘没了且没有 `.workspace-tray-quit` 标记 → 启动 `komorebi-tray` 任务
   - 托盘菜单里的「退出」会写这个标记（并留 whkd 继续跑），所以主动退出不会被看门狗立刻拉回来；下次登录时清除
 - **`runhidden.exe`**：所有需要跑 PowerShell 的地方都经过它（GUI 子系统 + `CREATE_NO_WINDOW`）
@@ -173,7 +181,7 @@ Error: failed call to AllowSetForegroundWindow after 5 retries
 
 ## 已知限制
 
-- komorebi 需要提权（见上），`komorebi.exe` 未签名所以没有 UIAccess；提权后反而能管理提权窗口
+- komorebi 现在由 Shell（explorer）链启动，是普通权限：能管理普通窗口，但提权窗口（管理员终端等）不会被平铺；由计划任务兜底启动时才提权
 - komorebi 启动前就已存在的窗口不会被自动接管，用 `komorebic manage` 手动接管当前聚焦窗口
 - komorebi v0.1.41 里 **monocle 状态下所有移动命令都会失败**（`ERROR: there is no container`，原因是窗口挂在 `monocle_container` 而不是 `containers`），所以 `win + o` 用 `move-to-monitor.ps1` 绕过：先关 monocle、移动、再在新屏打开
 - 任务栏胶囊是覆盖窗口，不参与任务栏布局；任务栏左对齐或关闭 Widgets 时位置会调整（脚本会读 `TaskbarDa` 自动左移）

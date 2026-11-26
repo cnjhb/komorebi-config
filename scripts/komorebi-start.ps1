@@ -13,19 +13,42 @@ Remove-Item (Join-Path $env:USERPROFILE '.workspace-tray-quit') -ErrorAction Sil
 
 $bin = Join-Path $env:ProgramFiles 'komorebi\bin'
 $env:PATH = "$bin;$env:PATH"
+$komorebi = Join-Path $bin 'komorebi.exe'
+$komorebic = Join-Path $bin 'komorebic.exe'
 
-# komorebi itself is started elevated by the "komorebi" scheduled task. A
-# medium-integrity start fails on Windows 11 26H2 (AllowSetForegroundWindow).
-$up = $false
-for ($i = 0; $i -lt 60; $i++) {
-    & (Join-Path $bin 'komorebic.exe') state *> $null
-    if ($LASTEXITCODE -eq 0) { $up = $true; break }
-    Start-Sleep -Milliseconds 500
+function Test-Komorebi {
+    & $komorebic state *> $null
+    return ($LASTEXITCODE -eq 0)
 }
+
+# komorebi is started from here on purpose.
+#
+# It refuses to start unless AllowSetForegroundWindow succeeds, and whether
+# that call is allowed depends on who launched it: a process started by
+# explorer (the shell) gets the right, one started by Task Scheduler or by a
+# random terminal is denied with ERROR_ACCESS_DENIED while the foreground lock
+# is armed. This script runs from the Startup shortcut -> explorer, so its
+# children can call it. The elevated "komorebi" scheduled task is only a
+# fallback and races with this on purpose: whichever starts first wins,
+# komorebi rejects a second instance.
+$up = Test-Komorebi
+if (-not $up) {
+    Log 'komorebi is not running; starting it from the shell chain (medium)'
+    Start-Process -FilePath $komorebi -WindowStyle Hidden `
+        -RedirectStandardError (Join-Path $env:USERPROFILE 'komorebi-stderr.log') `
+        -RedirectStandardOutput (Join-Path $env:USERPROFILE 'komorebi-stdout.log') `
+        -ErrorAction SilentlyContinue
+    for ($i = 0; $i -lt 40; $i++) {
+        Start-Sleep -Milliseconds 500
+        if (Test-Komorebi) { $up = $true; break }
+    }
+}
+
 if ($up) {
     Log 'komorebi is up'
 } else {
-    Log 'WARNING: komorebi is not running (did the elevated scheduled task start?)'
+    $err = Get-Content (Join-Path $env:USERPROFILE 'komorebi-stderr.log') -Raw -ErrorAction SilentlyContinue
+    Log "WARNING: komorebi did not come up: $($err.Trim())"
 }
 
 # whkd is started (and supervised) by WorkspaceTray: that way the tray owns the

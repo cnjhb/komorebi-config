@@ -25,8 +25,12 @@ static class Watchdog
     {
         if (!Running("komorebi"))
         {
-            Log("komorebi is not running; starting the scheduled task");
-            RunTask("komorebi");
+            // Through explorer + the Startup shortcut, not the elevated task:
+            // AllowSetForegroundWindow only succeeds for processes started by
+            // the shell, and komorebi exits when it is denied. The scheduled
+            // task stays as a fallback when the shortcut is missing.
+            Log("komorebi is not running; starting it through the shell shortcut");
+            if (!RunStartupShortcut()) RunTask("komorebi");
             return 0;
         }
 
@@ -52,6 +56,29 @@ static class Watchdog
     {
         try { return Process.GetProcessesByName(name).Length > 0; }
         catch { return false; }
+    }
+
+    static bool RunStartupShortcut()
+    {
+        try
+        {
+            string lnk = Path.Combine(
+                Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),
+                @"Microsoft\Windows\Start Menu\Programs\Startup\komorebi.lnk");
+            if (!File.Exists(lnk)) return false;
+
+            var psi = new ProcessStartInfo(Path.Combine(Environment.SystemDirectory, "explorer.exe"),
+                                           "\"" + lnk + "\"");
+            psi.UseShellExecute = false;
+            psi.CreateNoWindow = true;
+            using (Process p = Process.Start(psi)) p.WaitForExit(5000);
+            return true;
+        }
+        catch (Exception ex)
+        {
+            Log("could not start the startup shortcut: " + ex.Message);
+            return false;
+        }
     }
 
     static void RunTask(string name)

@@ -80,6 +80,11 @@ public static class WmDiag {
 }
 
 Log ('diag: ' + (Get-Diag))
+$me = [Security.Principal.WindowsIdentity]::GetCurrent()
+$isAdmin = (New-Object Security.Principal.WindowsPrincipal($me)).IsInRole(
+    [Security.Principal.WindowsBuiltInRole]::Administrator)
+$label = (& whoami /groups | Select-String -Pattern 'Mandatory Label') -join ' '
+Log ("diag2: user=$($me.Name) admin=$isAdmin $($label.Trim())")
 
 if (Test-Komorebi) {
     Log 'komorebi already running'
